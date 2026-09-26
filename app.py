@@ -9,6 +9,9 @@ import streamlit as st
 from finmodel_agents import FinancialModelOrchestrator
 
 st.set_page_config(page_title="FinModel AI v7", page_icon="📊", layout="wide")
+
+# Visible build marker so deployment can be verified
+st.caption("Build: CLEAN-VALUATION-v11")
 st.title("FinModel AI — Financial Modelling & Valuation Platform")
 st.caption("Enter a company or ticker to build a complete financial model, forecast, valuation and downloadable Excel model.")
 
@@ -181,7 +184,11 @@ with tabs[0]:
     with right:
         mc = r["monte_carlo"]
         st.write("**Monte Carlo valuation range**")
-        st.write({"P10": money(mc.get("p10")), "Median": money(mc.get("p50")), "P90": money(mc.get("p90")), "Simulations": mc.get("count")})
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("P10", money(mc.get("p10")))
+        mc2.metric("Median", money(mc.get("p50")))
+        mc3.metric("P90", money(mc.get("p90")))
+        mc4.metric("Simulations", f"{int(mc.get('count', 0)):,}" if mc.get('count') is not None else "N/A")
 
 with tabs[1]:
     st.caption("Historical annual data from the market-data provider. These are actual/source values, not model forecasts.")
@@ -209,17 +216,82 @@ with tabs[3]:
     st.warning("Generic corporate model: 'Other Liabilities' is the balancing residual. Banks, NBFCs, insurers and REITs require sector-specific models and should not rely on this generic template.")
 
 with tabs[4]:
-    l, rr = st.columns([1, 2])
-    with l:
-        st.write("**DCF**")
-        st.json({k: (round(float(v), 4) if isinstance(v, (float, int, np.floating)) and np.isfinite(v) else v) for k, v in val.items() if k != "UFCF"})
-        st.write("**Reverse DCF**")
-        st.json(r["reverse_dcf"])
-        st.write("**Monte Carlo**")
-        st.json(r["monte_carlo"])
-    with rr:
+    st.markdown("### Valuation summary")
+    st.caption("DCF, reverse DCF and Monte Carlo outputs presented as finance metrics — no raw code/JSON.")
+
+    current_price = info.get("currentPrice", info.get("regularMarketPrice"))
+    try:
+        current_price = float(current_price) if current_price is not None else np.nan
+    except Exception:
+        current_price = np.nan
+
+    implied_price = float(val.get("Implied Price", np.nan))
+    wacc = float(val.get("WACC", np.nan))
+    terminal_growth = float(val.get("Terminal Growth", np.nan))
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Current Price", f"{current_price:,.2f}" if np.isfinite(current_price) else "N/A")
+    k2.metric(
+        "DCF Implied Price",
+        f"{implied_price:,.2f}" if np.isfinite(implied_price) else "N/A",
+        delta=(f"{(implied_price/current_price-1):+.1%}" if np.isfinite(implied_price) and np.isfinite(current_price) and current_price else None),
+    )
+    k3.metric("WACC", f"{wacc:.1%}" if np.isfinite(wacc) else "N/A")
+    k4.metric("Terminal Growth", f"{terminal_growth:.1%}" if np.isfinite(terminal_growth) else "N/A")
+
+    st.markdown("#### DCF bridge")
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("PV of Forecast FCF", f"{float(val.get('PV Forecast FCF', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('PV Forecast FCF', np.nan))) else "N/A")
+    d2.metric("PV of Terminal Value", f"{float(val.get('PV Terminal Value', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('PV Terminal Value', np.nan))) else "N/A")
+    d3.metric("Enterprise Value", f"{float(val.get('Enterprise Value', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('Enterprise Value', np.nan))) else "N/A")
+    d4.metric("Equity Value", f"{float(val.get('Equity Value', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('Equity Value', np.nan))) else "N/A")
+
+    left, right = st.columns([1, 2])
+    with left:
+        st.markdown("#### Reverse DCF")
+        rev = r.get("reverse_dcf", {}) or {}
+        target_price = rev.get("Target Price", np.nan)
+        scale = rev.get("Implied UFCF Scale", np.nan)
+        try: target_price = float(target_price)
+        except Exception: target_price = np.nan
+        try: scale = float(scale)
+        except Exception: scale = np.nan
+        r1, r2 = st.columns(2)
+        r1.metric("Market / Target Price", f"{target_price:,.2f}" if np.isfinite(target_price) else "N/A")
+        r2.metric("Implied FCF vs Base", f"{scale:.2f}x" if np.isfinite(scale) else "N/A")
+        if np.isfinite(scale):
+            if 0.95 <= scale <= 1.05:
+                st.info("Market price is broadly consistent with the base-case cash-flow path.")
+            elif scale > 1.05:
+                st.info("Market price implies cash flows above the base-case path.")
+            else:
+                st.info("Market price implies cash flows below the base-case path.")
+
+        st.markdown("#### Monte Carlo valuation")
+        mc = r.get("monte_carlo", {}) or {}
+        p10 = float(mc.get("p10", np.nan)); p50 = float(mc.get("p50", np.nan)); p90 = float(mc.get("p90", np.nan)); mean = float(mc.get("mean", np.nan))
+        mc_df = pd.DataFrame({
+            "Case": ["P10", "Median", "Mean", "P90"],
+            "Implied Price": [p10, p50, mean, p90],
+        })
+        st.dataframe(mc_df.style.format({"Implied Price": "{:,.2f}"}), hide_index=True, width="stretch")
+        st.caption("P10–P90 shows the valuation range from simulated WACC, terminal growth and cash-flow assumptions.")
+
+    with right:
+        st.markdown("#### DCF sensitivity")
         sens = r["sensitivity"].pivot(index="WACC", columns="Terminal Growth", values="Implied Price")
-        st.plotly_chart(px.imshow(sens, aspect="auto", text_auto=".2f", title="DCF sensitivity — implied price"), width="stretch")
+        sens.index = [f"{x:.0%}" for x in sens.index]
+        sens.columns = [f"{x:.1%}" for x in sens.columns]
+        fig_sens = px.imshow(
+            sens,
+            aspect="auto",
+            text_auto=".2f",
+            labels={"x": "Terminal Growth", "y": "WACC", "color": "Implied Price"},
+            title="Implied price across WACC and terminal-growth assumptions",
+        )
+        st.plotly_chart(fig_sens, width="stretch", config={"displayModeBar": False, "displaylogo": False})
+
+    st.caption("Valuation outputs are model estimates, not investment advice or analyst consensus.")
 
 with tabs[5]:
     if r["comps"] is None or r["comps"].empty:
@@ -227,7 +299,18 @@ with tabs[5]:
     else:
         st.dataframe(r["comps"], width="stretch")
         st.write("**Peer multiple distribution**")
-        st.json(r["comps_summary"])
+        summary = r.get("comps_summary", {}) or {}
+        if summary:
+            st.markdown("#### Comparable valuation summary")
+            summary_rows = []
+            for key, value in summary.items():
+                label = str(key).replace("_", " ").title()
+                if isinstance(value, (int, float, np.integer, np.floating)):
+                    display = f"{float(value):,.2f}"
+                else:
+                    display = str(value)
+                summary_rows.append({"Metric": label, "Value": display})
+            st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
 
 with tabs[6]:
     if not r["consensus"]:
@@ -251,7 +334,13 @@ with tabs[8]:
         st.error("One or more model checks failed. Review assumptions/model output before using the valuation.")
     else:
         st.success("Core balance-sheet and cash roll-forward checks passed for all scenarios.")
-    st.json(meta)
+    st.markdown("#### Model metadata")
+    meta_rows = []
+    for key, value in meta.items():
+        if isinstance(value, (dict, list, tuple)):
+            value = str(value)
+        meta_rows.append({"Field": str(key), "Value": value})
+    st.dataframe(pd.DataFrame(meta_rows), hide_index=True, width="stretch")
 
 with tabs[9]:
     orch = FinancialModelOrchestrator()
