@@ -9,8 +9,8 @@ import streamlit as st
 from finmodel_agents import FinancialModelOrchestrator
 
 st.set_page_config(page_title="FinModel AI v7", page_icon="📊", layout="wide")
-st.title("FinModel AI v7 — AI Financial Modelling & Valuation Platform")
-st.caption("Company name/ticker → actuals → integrated 3-statement forecast → DCF/reverse DCF/Monte Carlo → comps → audit → Excel + Power BI pack")
+st.title("FinModel AI — Financial Modelling & Valuation Platform")
+st.caption("Enter a company or ticker to build a complete financial model, forecast, valuation and downloadable Excel model.")
 
 
 # Finance-professional UI theme: restrained color, clear KPI cards, clean chart canvas.
@@ -36,6 +36,37 @@ def money(x):
         return f"{x:,.2f}" if np.isfinite(x) else "N/A"
     except Exception:
         return "N/A"
+
+
+CRORE = 10_000_000
+
+def cr_value(x):
+    try:
+        x = float(x)
+        return x / CRORE if np.isfinite(x) else np.nan
+    except Exception:
+        return np.nan
+
+def crore_df(df):
+    """Scale monetary financial-statement tables to crores for display only."""
+    out = df.copy()
+    numeric_cols = out.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols):
+        out.loc[:, numeric_cols] = out.loc[:, numeric_cols] / CRORE
+    return out
+
+def crore_model(model):
+    """Scale all amount rows in a statement-style model while preserving ratio/check rows."""
+    out = model.copy()
+    ratio_rows = {
+        "Revenue Growth", "Gross Margin", "EBITDA Margin", "EBIT Margin",
+        "Net Margin", "FCF Margin", "Tax Rate", "ROE", "ROA",
+        "Balance Check", "Cash Flow Check"
+    }
+    for idx in out.index:
+        if str(idx) not in ratio_rows:
+            out.loc[idx] = pd.to_numeric(out.loc[idx], errors="coerce") / CRORE
+    return out
 
 
 with st.sidebar:
@@ -69,13 +100,13 @@ if run or demo_run:
         st.error(f"Model run failed: {exc}")
         st.stop()
 
-st.markdown("### Multi-agent modelling architecture")
+st.markdown("### How the model works")
 arch_cols = st.columns(4)
 architecture = [
-    ("1. Data", "Resolver → Market Data → Historical Statements"),
-    ("2. Model", "Normalization → Operating Schedules → 3-Statement Forecast"),
-    ("3. Valuation", "DCF → Reverse DCF → Monte Carlo → Trading Comps"),
-    ("4. Control", "Consensus → KPI/Risk → Audit → Excel / Power BI Export"),
+    ("1. Company Data", "Company identification → market data → historical financial statements"),
+    ("2. Financial Model", "Historical normalization → operating schedules → integrated 3-statement forecast"),
+    ("3. Valuation", "DCF → reverse DCF → scenario analysis → trading comparables"),
+    ("4. Review & Export", "KPIs → risk checks → model audit → Excel / Power BI export"),
 ]
 for col, (head, body) in zip(arch_cols, architecture):
     with col:
@@ -116,18 +147,12 @@ st.caption(
 )
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Market Cap", f"{float(info.get('marketCap')):,.0f}" if info.get("marketCap") else "N/A")
+c1.metric("Market Cap (Cr)", f"{cr_value(info.get('marketCap')):,.1f}" if info.get("marketCap") else "N/A")
 current_price = info.get("currentPrice") or info.get("regularMarketPrice")
 c2.metric("Current Price", money(current_price))
 c3.metric("DCF Implied Price", money(val.get("Implied Price")))
 c4.metric("WACC", f"{val.get('WACC', np.nan):.1%}" if np.isfinite(val.get("WACC", np.nan)) else "N/A")
 c5.metric("MC Median Price", money(r["monte_carlo"].get("p50")))
-
-agent_names = [
-    "Resolver", "Market Data", "Normalization", "Operating Schedules", "3-Statement", "KPI/Risk",
-    "DCF", "Reverse DCF", "Monte Carlo", "Trading Comps", "Consensus", "Audit", "Export"
-]
-st.caption("Agents used: " + " • ".join(agent_names))
 
 tabs = st.tabs([
     "Executive Dashboard", "Historical Actuals", "Forecast & Schedules", "3-Statement Model",
@@ -136,9 +161,9 @@ tabs = st.tabs([
 
 with tabs[0]:
     base = fc["Base"]
-    chart = base.loc[["Revenue", "EBITDA", "Net Income", "FCF"]].T.reset_index(names="Period")
-    fig_forecast = px.line(chart, x="Period", y=["Revenue", "EBITDA", "Net Income", "FCF"], markers=True, title="Base-case forecast", color_discrete_sequence=["#4472C4", "#70AD47", "#7030A0", "#ED7D31"])
-    fig_forecast.update_layout(legend_title_text="", plot_bgcolor="white", paper_bgcolor="white")
+    chart = (base.loc[["Revenue", "EBITDA", "Net Income", "FCF"]] / CRORE).T.reset_index(names="Period")
+    fig_forecast = px.line(chart, x="Period", y=["Revenue", "EBITDA", "Net Income", "FCF"], markers=True, title=f"Base-case forecast ({meta.get('Currency') or ''} Cr)", color_discrete_sequence=["#4472C4", "#70AD47", "#7030A0", "#ED7D31"])
+    fig_forecast.update_layout(legend_title_text="", plot_bgcolor="white", paper_bgcolor="white", yaxis_title=f"{meta.get('Currency') or 'Currency'} Crore")
     st.plotly_chart(fig_forecast, width="stretch")
 
     m = kpis.reset_index(names="Period")
@@ -160,11 +185,13 @@ with tabs[0]:
 
 with tabs[1]:
     st.caption("Historical annual data from the market-data provider. These are actual/source values, not model forecasts.")
-    st.dataframe(hist.style.format("{:,.0f}"), width="stretch")
+    st.caption(f"Monetary values shown in {meta.get('Currency') or 'Currency'} crore (Cr).")
+    st.dataframe(crore_model(hist).style.format("{:,.1f}"), width="stretch")
 
 with tabs[2]:
     scen = st.selectbox("Scenario", ["Bear", "Base", "Bull"], index=1, key="forecast_scenario")
-    st.dataframe(fc[scen].style.format("{:,.0f}"), width="stretch")
+    st.caption(f"Monetary values shown in {meta.get('Currency') or 'Currency'} crore (Cr).")
+    st.dataframe(crore_model(fc[scen]).style.format("{:,.1f}"), width="stretch")
     st.write("**Base assumptions**")
     st.dataframe(pd.DataFrame({"Assumption": list(r["assumptions"].keys()), "Value": list(r["assumptions"].values())}), width="stretch")
     st.caption("Bull/Bear scenarios adjust revenue growth and margins around the base assumptions. The forecast is deterministic and formula-driven.")
@@ -172,12 +199,13 @@ with tabs[2]:
 with tabs[3]:
     scen3 = st.radio("3-statement scenario", ["Base", "Bull", "Bear"], horizontal=True)
     model = fc[scen3]
+    st.caption(f"Monetary values shown in {meta.get('Currency') or 'Currency'} crore (Cr). Per-share valuation metrics remain in reporting currency.")
     st.write("**Income Statement**")
-    st.dataframe(model.loc[["Revenue", "COGS", "Gross Profit", "EBITDA", "D&A", "EBIT", "Interest Expense", "Pretax Income", "Tax", "Net Income"]].style.format("{:,.0f}"), width="stretch")
+    st.dataframe(crore_model(model.loc[["Revenue", "COGS", "Gross Profit", "EBITDA", "D&A", "EBIT", "Interest Expense", "Pretax Income", "Tax", "Net Income"]]).style.format("{:,.1f}"), width="stretch")
     st.write("**Balance Sheet**")
-    st.dataframe(model.loc[["Cash", "Accounts Receivable", "Inventory", "Net PPE", "Other Assets", "Total Assets", "Accounts Payable", "Total Debt", "Other Liabilities", "Equity", "Total Liabilities & Equity", "Balance Check"]].style.format("{:,.0f}"), width="stretch")
+    st.dataframe(crore_model(model.loc[["Cash", "Accounts Receivable", "Inventory", "Net PPE", "Other Assets", "Total Assets", "Accounts Payable", "Total Debt", "Other Liabilities", "Equity", "Total Liabilities & Equity", "Balance Check"]]).style.format("{:,.1f}"), width="stretch")
     st.write("**Cash Flow / Schedules**")
-    st.dataframe(model.loc[["CFO", "Capex", "Debt Issuance/(Repayment)", "Dividends", "Net Change in Cash", "Cash Flow Check", "FCF"]].style.format("{:,.0f}"), width="stretch")
+    st.dataframe(crore_model(model.loc[["CFO", "Capex", "Debt Issuance/(Repayment)", "Dividends", "Net Change in Cash", "Cash Flow Check", "FCF"]]).style.format("{:,.1f}"), width="stretch")
     st.warning("Generic corporate model: 'Other Liabilities' is the balancing residual. Banks, NBFCs, insurers and REITs require sector-specific models and should not rely on this generic template.")
 
 with tabs[4]:

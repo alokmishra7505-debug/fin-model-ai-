@@ -47,7 +47,13 @@ Use a liquid, widely followed non-financial company such as `AAPL`, `MSFT`, `NVD
 
 This project is for financial modelling, analysis and educational/personal research. Outputs depend on third-party market data and user/model assumptions and should be independently verified before investment or business decisions.
 
-## v7 interview polish
+## v8 interview polish
 - One-click AAPL demo with peers preloaded.
 - Visible multi-agent architecture on the landing page.
 - Same entrypoint works locally (`app.py`) and on Streamlit Community Cloud (`streamlit_app.py`).
+
+
+## v8 display improvements
+- Interview-clean UI with reduced developer/technical chrome.
+- Market cap and statement values displayed in reporting-currency crores (Cr).
+- Per-share valuation metrics remain in the original reporting currency.
