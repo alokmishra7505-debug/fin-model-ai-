@@ -11,7 +11,7 @@ def package_project():
     files = [ROOT / name for name in (
         "app.py", "streamlit_app.py", "requirements.txt", "requirements-dev.txt",
         "README.md", "DEPLOYMENT.md", "start_mac.sh", ".gitignore",
-        ".streamlit/config.toml", "data/README.md", "exports/.gitkeep",
+        ".streamlit/config.toml", "static/release.txt", "data/README.md", "exports/.gitkeep",
     )]
     for directory in ("finmodel_agents", "tests", "scripts"):
         files.extend(sorted((ROOT / directory).glob("*.py")))
