@@ -1,399 +1,410 @@
-import tempfile
-from pathlib import Path
-
+"""FinModel AI — unified Streamlit dashboard."""
+from dataclasses import asdict
+import html
+import logging
+import re
 import numpy as np
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+from finmodel_agents.market_data import MarketDataAgent
+from finmodel_agents.resolver import resolve
+from finmodel_agents.normalizer import normalize
+from finmodel_agents.forecasting import Assumptions, LABELS, default_assumptions
+from finmodel_agents.orchestrator import run_model
+from finmodel_agents.valuation import Valuation, reverse_dcf, monte_carlo
+from finmodel_agents.kpis import calculate_kpis, PERCENT_KPIS, DAY_KPIS
+from finmodel_agents.comps import trading_comps
+from finmodel_agents.export import excel_workbook, powerbi_files
+from finmodel_agents.utils import Units, finite, pct, multiple, statement_display, safe_div
 
-from finmodel_agents import FinancialModelOrchestrator
-
-st.set_page_config(page_title="FinModel AI v7", page_icon="📊", layout="wide")
-
-# Visible build marker so deployment can be verified
-st.caption("Build: CLEAN-VALUATION-v11")
-st.title("FinModel AI — Financial Modelling & Valuation Platform")
-st.caption("Enter a company or ticker to build a complete financial model, forecast, valuation and downloadable Excel model.")
-
-
-# Finance-professional UI theme: restrained color, clear KPI cards, clean chart canvas.
-st.markdown("""
-<style>
-[data-testid="stMetric"] {
-  background: linear-gradient(135deg, #0B1F33 0%, #17365D 100%);
-  border: 1px solid #2F75B5;
-  padding: 14px 14px 10px 14px;
-  border-radius: 10px;
-}
-[data-testid="stMetricLabel"], [data-testid="stMetricValue"] { color: white !important; }
-[data-testid="stSidebar"] { border-right: 1px solid rgba(100,116,139,.25); }
-.stTabs [data-baseweb="tab-list"] { gap: 4px; }
-.stTabs [data-baseweb="tab"] { border-radius: 7px 7px 0 0; padding: 8px 12px; }
-</style>
-""", unsafe_allow_html=True)
+COLORS = ["#172b4d", "#087f8c", "#b38b4d", "#707bb6"]
+FOOTER = "Actual financial data is retrieved from public market-data sources. Forecasts are model-generated estimates and should not be confused with analyst consensus unless explicitly labeled. Critical investment decisions should be verified against company filings and primary sources. This application is for research and education, not financial advice."
 
 
-def money(x):
-    try:
-        x = float(x)
-        return f"{x:,.2f}" if np.isfinite(x) else "N/A"
-    except Exception:
-        return "N/A"
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_company(ticker):
+    return MarketDataAgent().fetch(ticker)
 
 
-CRORE = 10_000_000
-
-def cr_value(x):
-    try:
-        x = float(x)
-        return x / CRORE if np.isfinite(x) else np.nan
-    except Exception:
-        return np.nan
-
-def crore_df(df):
-    """Scale monetary financial-statement tables to crores for display only."""
-    out = df.copy()
-    numeric_cols = out.select_dtypes(include=[np.number]).columns
-    if len(numeric_cols):
-        out.loc[:, numeric_cols] = out.loc[:, numeric_cols] / CRORE
-    return out
-
-def crore_model(model):
-    """Scale all amount rows in a statement-style model while preserving ratio/check rows."""
-    out = model.copy()
-    ratio_rows = {
-        "Revenue Growth", "Gross Margin", "EBITDA Margin", "EBIT Margin",
-        "Net Margin", "FCF Margin", "Tax Rate", "ROE", "ROA",
-        "Balance Check", "Cash Flow Check"
-    }
-    for idx in out.index:
-        if str(idx) not in ratio_rows:
-            out.loc[idx] = pd.to_numeric(out.loc[idx], errors="coerce") / CRORE
-    return out
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_peers(tickers):
+    return trading_comps(tickers)
 
 
-with st.sidebar:
-    st.header("Run model")
-    company_input = st.text_input("Company name or ticker", value="AAPL", help="Examples: Apple, AAPL, Reliance Industries, RELIANCE.NS")
-    peers_text = st.text_input("Peer tickers (optional)", value="", help="Comma-separated, e.g. MSFT,GOOGL,AMZN")
-    years = st.slider("Forecast years", 3, 10, 5)
-    simulations = st.slider("Monte Carlo simulations", 100, 2000, 500, 100)
-    run = st.button("Run complete model", type="primary", width="stretch")
-    demo_run = st.button("▶ Run 1-click demo (AAPL)", width="stretch")
+@st.cache_data(show_spinner=False)
+def cached_model(data, a, years):
+    return run_model(data,a,years)
+
+
+@st.cache_data(show_spinner=False)
+def valuation_extras(hist,data,a,years,forecast,count,seed):
+    growth,message = reverse_dcf(hist,data,a,years,data.info.get("currentPrice",np.nan))
+    samples,summary = monte_carlo(forecast,data,count,seed)
+    return growth,message,samples,summary
+
+
+@st.cache_data(show_spinner=False)
+def export_excel(bundle,units,comps):
+    return excel_workbook(bundle,units,comps)
+
+
+def style():
+    st.markdown("""<style>
+    .block-container {max-width:1540px;padding-top:2rem;padding-bottom:2rem}
+    h1,h2,h3 {letter-spacing:-.035em}
+    .eyebrow {font-size:12px;letter-spacing:.17em;color:#087f8c;font-weight:700;text-transform:uppercase;margin-bottom:10px}
+    .hero {padding:28px 32px;background:#172b4d;border-radius:14px;margin:14px 0 25px;color:white}
+    .hero h2 {color:white;margin:0;font-size:32px}.hero p{color:#c7d6e7;margin:10px 0 0;max-width:800px}
+    .kpi-card {background:#fff;border:1px solid #dce4ef;border-top:4px solid var(--accent);border-radius:10px;padding:17px 18px;min-height:122px;margin-bottom:14px}
+    .kpi-label {font-size:12px;color:#61718a;font-weight:600;letter-spacing:.02em}
+    .kpi-value {font-size:26px;font-weight:700;color:#172b4d;letter-spacing:-.035em;white-space:nowrap}
+    .kpi-sub {font-size:11px;color:#75859a;margin-top:4px}
+    .step {border:1px solid #dce4ef;border-radius:10px;padding:20px;background:white;min-height:165px}
+    .step b{color:#087f8c;font-size:14px}.step p{font-size:14px;color:#61718a;margin:12px 0 0}
+    div[data-testid="stTabs"] button {font-size:13px}
+    div[data-testid="stDataFrame"] {border-radius:8px}
+    div[data-testid="stMetricValue"] {font-size:24px}
+    </style>""",unsafe_allow_html=True)
+
+
+def cards(items):
+    cols = st.columns(len(items))
+    for n,(label,value,subtitle) in enumerate(items):
+        with cols[n]:
+            st.markdown(f'<div class="kpi-card" style="--accent:{COLORS[n%len(COLORS)]}"><div class="kpi-label">{html.escape(label)}</div><div class="kpi-value">{html.escape(str(value))}</div><div class="kpi-sub">{html.escape(subtitle)}</div></div>',unsafe_allow_html=True)
+
+
+def chart(fig,key):
+    fig.update_layout(template="plotly_white",font={"family":"Arial","color":"#52647a"},height=350,
+        margin={"l":12,"r":12,"t":35,"b":20},paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
+        legend={"orientation":"h","y":-0.16},colorway=COLORS,hovermode="x unified")
+    fig.update_yaxes(tickformat=",.1f",gridcolor="#e8edf4",zerolinecolor="#c8d3e3")
+    st.plotly_chart(fig,config={"displayModeBar":False},width="stretch",key=key)
+
+
+def trend(hist,forecast,rows,units,title,key,percent=False):
+    fig = go.Figure()
+    for n,row in enumerate(rows):
+        if row not in hist.index:
+            continue
+        values = hist.loc[row]
+        scale = 100 if percent else 1/units.scale
+        fig.add_trace(go.Scatter(x=list(values.index),y=values.values*scale,name=f"{row} · Actual",mode="lines+markers",line={"color":COLORS[n%4],"width":3}))
+        if forecast is not None and row in forecast.index:
+            future = forecast.loc[row]
+            x = [values.index[-1]]+list(future.index)
+            y = [values.iloc[-1]*scale]+list(future.values*scale)
+            fig.add_trace(go.Scatter(x=x,y=y,name=f"{row} · Model Forecast",mode="lines+markers",line={"color":COLORS[n%4],"width":2,"dash":"dot"}))
+    fig.update_layout(title={"text":title,"font":{"size":16}},yaxis_title="%" if percent else units.label)
+    chart(fig,key)
+
+
+def table(frame,units,forecast=False):
+    if frame.empty:
+        st.info("No annual statement data is available.")
+        return
+    display = statement_display(frame,units)
+    display.columns = [str(col)+( " · Forecast" if forecast else " · Actual") for col in display.columns]
+    st.dataframe(display,width="stretch",height=min(740,38+35*len(display)),column_config={"_index":"Metric"})
+
+
+def workflow():
+    st.subheader("How the model works")
+    steps = [("01 · Data","Company resolution → Public market data → Historical statements"),
+             ("02 · Model","Normalization → Operating schedules → Three-statement forecast"),
+             ("03 · Valuation","DCF → Reverse DCF → Monte Carlo → Trading comps"),
+             ("04 · Control","Consensus → KPIs & risks → Audit → Excel & Power BI")]
+    for col,(title,body) in zip(st.columns(4),steps):
+        with col:
+            st.markdown(f'<div class="step"><b>{title}</b><p>{body}</p></div>',unsafe_allow_html=True)
+
+
+def assumptions_editor(data, a):
+    st.subheader("Operating and valuation assumptions")
+    st.caption("Operating defaults use bounded historical ratios when available. Capital-market and financing defaults are illustrative inputs, not current market yields. All rates below are percentages; beta and working-capital days are unscaled.")
+    values = {}
+    with st.form(f"assumption_form_{data.ticker}"):
+        cols = st.columns(3)
+        for n,(key,value) in enumerate(asdict(a).items()):
+            raw = key in ("dso","dio","dpo","beta")
+            with cols[n%3]:
+                values[key] = st.number_input(LABELS[key]+("" if raw else " (%)"),value=float(value if raw else value*100),step=.1 if key=="beta" else 1.0 if raw else .25,format="%.2f",key=f"driver_{data.ticker}_{key}")/(1 if raw else 100)
+        submitted = st.form_submit_button("Apply assumptions",type="primary")
+    if submitted:
+        try:
+            changed = Assumptions(**values)
+            changed.validate()
+            st.session_state[f"assumptions_{data.ticker}"] = changed
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+def main():
+    st.set_page_config(page_title="FinModel AI | Financial modelling & valuation",page_icon="◈",layout="wide")
+    style()
+    with st.sidebar:
+        st.markdown("## ◈ FinModel AI")
+        st.caption("FINANCIAL MODELLING & VALUATION")
+        with st.form("company_search"):
+            query = st.text_input("Company name or ticker",value="AAPL",placeholder="e.g. Reliance or RELIANCE.NS")
+            peers = st.text_input("Peer tickers (optional)",placeholder="MSFT, GOOGL, NVDA")
+            analyze = st.form_submit_button("Build financial model",type="primary",width="stretch")
+        demo = st.button("Run 1-click demo (AAPL)",width="stretch")
+        st.divider()
+        years = st.slider("Forecast years",3,5,5)
+        count = st.select_slider("Monte Carlo simulations",[250,500,1000,2500,5000,10000],value=1000)
+        unit_choice = st.selectbox("Display units",["Auto","Crore","Million","Billion"])
+        with st.expander("Simulation settings"):
+            seed = st.number_input("Random seed",min_value=0,max_value=2147483647,value=42,step=1)
+        refresh = st.button("Refresh public data",width="stretch",disabled="company" not in st.session_state)
+        st.caption("No API key required. Public data can be delayed, incomplete or temporarily rate-limited.")
+        st.caption("Examples: AAPL · MSFT · NVDA · RELIANCE.NS · TCS.NS · ASIANPAINT.NS · HDFCBANK.NS")
+    st.markdown('<div class="eyebrow">Research workspace / Public equities</div>',unsafe_allow_html=True)
+    st.title("Financial clarity. From filings to forecasts.")
+    if analyze or demo or refresh:
+        with st.spinner("Retrieving public financial statements…"):
+            try:
+                ticker = "AAPL" if demo else st.session_state["company"].ticker if refresh else resolve(query)
+                if refresh:
+                    fetch_company.clear(ticker)
+                    fetch_peers.clear()
+                data = fetch_company(ticker)
+                st.session_state["company"] = data
+                if not refresh:
+                    st.session_state["peers"] = [] if demo else [x.strip().upper() for x in re.split(r"[,;\s]+",peers) if x.strip()][:12]
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception:
+                logging.exception("Company load failed")
+                st.error("Public data could not be retrieved. Try again shortly or enter an exact exchange ticker.")
+    if "company" not in st.session_state:
+        st.markdown('<div class="hero"><h2>One company. A complete modelling workspace.</h2><p>Explore historical performance, build transparent forecasts and test valuation assumptions. Start with a listed company or launch the Apple demo.</p></div>',unsafe_allow_html=True)
+        cards([("10 workspaces","Research → valuation","Statements, schedules and diagnostics"),("3 scenarios","Bear · Base · Bull","Editable, deterministic financial drivers"),("2 export formats","Excel + Power BI","Formula-linked workbook and direct CSVs")])
+        workflow()
+        st.info("Live data is loaded when you build a model. If Yahoo is unavailable, an existing local snapshot can be used with its original retrieval date; the app never substitutes invented financials.")
+        st.divider()
+        st.caption(FOOTER)
+        return
+    data = st.session_state["company"]
+    hist = normalize(data)
+    units = Units(data.currency,unit_choice)
+    quote_units = Units(data.info.get("currency",data.currency),unit_choice)
+    st.subheader(f"{data.name} · {data.ticker}")
+    st.caption(f"{data.info.get('sector','Sector unavailable')} / {data.info.get('industry','Industry unavailable')}  ·  {data.info.get('exchange','Exchange unavailable')}  ·  {units.label}")
+    st.caption(f"Source: {data.source} · Retrieved {data.retrieved_at} · {'Saved local snapshot' if data.cached else 'Public-source snapshot'}")
+    for warning in data.warnings:
+        st.warning(warning)
+    if hist.income.empty:
+        st.info("Historical analysis needs annual statements. Use Refresh public data to retry or select another company.")
+        st.caption(FOOTER)
+        return
+    a = st.session_state.get(f"assumptions_{data.ticker}",default_assumptions(hist,data.info))
+    bundle = cached_model(data,a,years)
+    for notice in bundle.notices:
+        st.warning(notice)
+    scenario = st.radio("Model scenario",["Bear","Base","Bull"],index=1,horizontal=True)
+    forecast = bundle.forecasts.get(scenario)
+    val = bundle.valuations.get(scenario,Valuation(message="Valuation is unavailable without a usable forecast."))
+    st.caption(f"Annual Actuals through {hist.years[-1]} · {scenario} Model Forecast · Amounts in {units.label}; prices are per share.")
+    tabs = st.tabs(["Executive Dashboard","Historical Actuals","Forecast & Schedules","3-Statement Model","Valuation","Trading Comps","Consensus","KPIs & Risks","Audit","Excel / Power BI"])
+    with tabs[0]:
+        latest = hist.income.iloc[:,-1]
+        cards([("Revenue",units.money(latest["Revenue"]),f"Actual · {hist.years[-1]}"),
+               ("EBITDA",units.money(latest["EBITDA"]),f"Margin {pct(safe_div(latest['EBITDA'],latest['Revenue']))}"),
+               ("Free cash flow",units.money(hist.cashflow.iloc[:,-1]["FCF"]),"Actual CFO less capex"),
+               ("DCF implied price",units.money(val.values.get("Implied Price"),True),f"{scenario} model · {pct(val.values.get('Upside'))} implied upside")])
+        left,right = st.columns(2)
+        with left:
+            trend(hist.income,forecast.income if forecast else None,["Revenue"],units,"Revenue trajectory","revenue")
+        with right:
+            trend(hist.income,forecast.income if forecast else None,["EBITDA","Net Income"],units,"Profitability","profit")
+        left,right = st.columns(2)
+        with left:
+            trend(hist.cashflow,forecast.cashflow if forecast else None,["FCF"],units,"Free cash flow","fcf")
+        with right:
+            k = bundle.kpis
+            historical_k = k.loc[["Gross margin","EBITDA margin","Net margin"],hist.years]
+            forecast_k = calculate_kpis(forecast.income,forecast.balance,forecast.cashflow) if forecast else None
+            trend(historical_k,forecast_k,["Gross margin","EBITDA margin","Net margin"],units,"Margin trends","margins",True)
+        if bundle.forecasts:
+            fig = go.Figure()
+            for name,model in bundle.forecasts.items():
+                fig.add_trace(go.Scatter(x=model.income.columns,y=model.income.loc["Revenue"]/units.scale,name=name,mode="lines+markers"))
+            fig.update_layout(title="Scenario comparison · forecast revenue",yaxis_title=units.label)
+            chart(fig,"scenario_revenue")
+        workflow()
+    with tabs[1]:
+        st.subheader("Historical actuals")
+        st.caption("Annual fiscal periods from Yahoo Finance. N/A means the source did not provide a value. Derived lines and residual categories are disclosed below.")
+        st.markdown("#### Income statement")
+        table(hist.income,units)
+        st.markdown("#### Balance sheet")
+        table(hist.balance,units)
+        st.markdown("#### Cash flow")
+        table(hist.cashflow,units)
+        with st.expander("Normalization and source disclosures"):
+            for line in hist.notes:
+                st.caption(line)
+    with tabs[2]:
+        assumptions_editor(data,a)
+        st.caption("Bear: revenue growth −3 percentage points, gross / EBITDA margins −2 points, DSO +5 days. Bull: the reverse. Other drivers remain unchanged; supported bounds apply.")
+        if forecast:
+            st.markdown(f"#### {scenario} operating schedules")
+            for name,frame in forecast.schedules.items():
+                with st.expander(name,expanded=name=="Revenue Build"):
+                    table(frame,units,True)
+    with tabs[3]:
+        st.subheader(f"Integrated three-statement model · {scenario}")
+        if forecast:
+            max_balance = forecast.balance.loc["Balance Check"].abs().max()
+            max_cash = forecast.cashflow.loc["Cash Reconciliation"].abs().max()
+            cards([("Balance check","Balanced" if max_balance<=1 else "Review required",f"Max residual: {max_balance:,.4f} {data.currency}"),
+                   ("Cash reconciliation","Reconciled" if max_cash<=1 else "Review required",f"Max residual: {max_cash:,.4f} {data.currency}"),
+                   ("Additional debt funding",units.money(forecast.cashflow.loc["Funding Draw"].sum()),"Explicit draws across forecast years")])
+            for label,frame in (("Income statement",forecast.income),("Balance sheet",forecast.balance),("Cash flow statement",forecast.cashflow)):
+                st.markdown(f"#### {label}")
+                table(frame,units,True)
+            with st.expander("Model mechanics and simplifying assumptions",expanded=True):
+                for line in forecast.notes:
+                    st.caption(line)
+        else:
+            st.info("An integrated forecast is unavailable for this dataset. Review the notices and historical actuals.")
+    with tabs[4]:
+        st.subheader(f"Valuation overview · {scenario}")
+        if val.values:
+            v = val.values
+            cards([("Current price",quote_units.money(v["Current Price"],True),"Public market quote"),("DCF implied price",units.money(v["Implied Price"],True),"Model estimate per share"),
+                ("Upside / downside",pct(v["Upside"]),"Relative to market price"),("WACC",pct(v["WACC"]),"Market equity / book-debt weights"),("Terminal growth",pct(v["Terminal Growth"]),"Gordon growth perpetuity")])
+            left,right = st.columns([1,1.25])
+            with left:
+                st.markdown("#### Enterprise-to-equity bridge")
+                bridge = ["PV Forecast FCF","PV Terminal Value","Enterprise Value","Net Debt","Minority Interest","Preferred Equity","Equity Value"]
+                st.dataframe(pd.DataFrame({"Valuation component":bridge,"Amount":[units.money(v[k]) for k in bridge]}),hide_index=True,width="stretch")
+                st.caption(f"Cost of equity {pct(v['Cost of Equity'])} · After-tax debt cost {pct(v['After-tax Cost of Debt'])} · Debt weight {pct(v['Debt Weight'])}")
+            with right:
+                sensitivity = val.sensitivity
+                z = sensitivity.to_numpy(dtype=float)
+                fig = go.Figure(go.Heatmap(z=z,x=[pct(x) for x in sensitivity.columns],y=[pct(x) for x in sensitivity.index],
+                    colorscale=[[0,"#f0ddd5"],[.5,"#f3f7f8"],[1,"#087f8c"]],text=[[units.money(x,True) for x in row] for row in z],texttemplate="%{text}",showscale=False,
+                    hovertemplate="WACC %{y}<br>Terminal growth %{x}<br>Price %{text}<extra></extra>"))
+                fig.update_layout(title="DCF sensitivity · implied price per share",xaxis_title="Terminal growth",yaxis_title="WACC")
+                chart(fig,"sensitivity")
+            st.caption("Year-end discounting from the latest fiscal period; no stub-period adjustment to today's date. Current market capitalization weights equity, and latest annual book debt approximates market-value debt. Cash includes short-term investments where available. No automatic FX conversion. Minority and preferred claims are deducted when reported.")
+            with st.expander("Unlevered cash-flow build"):
+                frame = val.cashflows.copy()
+                shown = statement_display(frame,units)
+                shown.loc["Discount Factor"] = [f"{x:.4f}x" for x in frame.loc["Discount Factor"]]
+                st.dataframe(shown,width="stretch")
+                st.caption("UFCF = EBIT − unlevered cash taxes + D&A − capex − change in operating working capital.")
+            with st.spinner("Calculating reverse DCF and valuation distribution…"):
+                implied_growth,message,samples,summary = valuation_extras(hist,data,forecast.assumptions,years,forecast,count,seed)
+            st.markdown("#### Reverse DCF · what the market implies")
+            cards([("Market-implied revenue growth",pct(implied_growth),"Constant annual growth over the forecast"),("Selected scenario growth",pct(forecast.assumptions.growth),f"{scenario} input"),("Growth gap",pct(implied_growth-forecast.assumptions.growth),"Market-implied less model input")])
+            st.caption(message)
+            st.markdown("#### Monte Carlo valuation")
+            st.caption(f"Seed {seed:,} · {len(samples):,} valid of {count:,} draws. Independent normal driver shocks held constant across each path: revenue growth 3pp, gross / EBITDA margins 2pp, WACC 1pp, terminal growth 0.5pp. Reject non-positive terminal UFCF and WACC–growth spreads ≤0.5pp. These are assumption scenarios, not calibrated probabilities or confidence intervals.")
+            if len(samples):
+                st.dataframe(pd.DataFrame({"Statistic":summary.index,"Price per share":[units.money(x,True) for x in summary]}),hide_index=True,width="stretch")
+                fig = go.Figure(go.Histogram(x=samples,nbinsx=50,marker_color="#087f8c"))
+                fig.add_vline(x=v["Current Price"],line_dash="dash",line_color="#b38b4d") if finite(v["Current Price"]) else None
+                fig.update_layout(xaxis_title=f"Implied price per share ({data.currency})",yaxis_title="Simulation count",title="Valuation distribution · dashed line is market price")
+                chart(fig,"monte_carlo")
+            comparison = [(name,item.values.get("Implied Price",np.nan)) for name,item in bundle.valuations.items()]
+            fig = go.Figure(go.Bar(x=[x[0] for x in comparison]+["Market"],y=[x[1] for x in comparison]+[v["Current Price"]],marker_color=["#707bb6","#087f8c","#172b4d","#b38b4d"]))
+            fig.update_layout(title="Valuation comparison",yaxis_title=f"Price per share ({data.currency})")
+            chart(fig,"valuation_comparison")
+        else:
+            st.info(val.message)
+    peers_frame = pd.DataFrame()
+    with tabs[5]:
+        st.subheader("Trading comparables")
+        tickers = st.session_state.get("peers",[])
+        if tickers:
+            with st.spinner("Retrieving comparable-company metrics…"):
+                peers_frame,notes = fetch_peers(tuple(tickers))
+            for line in notes:
+                st.warning(line)
+            if not peers_frame.empty:
+                shown = peers_frame.copy()
+                for idx,row in peers_frame.iterrows():
+                    for col in ("Market Cap","EV","Revenue","EBITDA","Net Income"):
+                        currency = row["Quote Currency"] if col in ("Market Cap","EV") else row["Currency"]
+                        shown[col] = shown[col].astype(object)
+                        shown.at[idx,col] = Units(currency,unit_choice).money(row[col])
+                for col in ("Revenue Growth","EBITDA Margin","EV / Revenue","EV / EBITDA","P/E"):
+                    shown[col] = shown[col].map(pct if col in ("Revenue Growth","EBITDA Margin") else multiple)
+                st.dataframe(shown.drop(columns=["Retrieved"]),hide_index=True,width="stretch")
+                comparable_metrics = ["Revenue Growth","EBITDA Margin","EV / Revenue","EV / EBITDA","P/E"]
+                summary = peers_frame[comparable_metrics].agg(["median","mean"])
+                for col in summary.columns:
+                    summary[col] = summary[col].map(pct if col in ("Revenue Growth","EBITDA Margin") else multiple)
+                st.dataframe(summary,width="stretch")
+                st.caption("Yahoo trailing metrics; revenue growth is the provider's reported quarterly year-over-year growth. Market cap / EV use quote currency; operating metrics use reporting currency. Absolute values are not averaged across currencies. Ratios use available peers only; losses or missing denominators are N/A.")
+        else:
+            st.info("Enter optional peer tickers in the sidebar and build the model to compare companies.")
+    with tabs[6]:
+        st.subheader("Analyst consensus · source estimates")
+        st.caption("Only estimates actually returned by Yahoo Finance appear here. They are separate from FinModel AI's Bear / Base / Bull forecasts. Periods are provider-relative: current / next quarter and current / next fiscal year.")
+        if data.estimates:
+            labels = {"0q":"Current quarter","+1q":"Next quarter","0y":"Current fiscal year","+1y":"Next fiscal year"}
+            for name,frame in data.estimates.items():
+                st.markdown(f"#### {name}")
+                shown = frame.copy().astype(object)
+                for r in frame.index:
+                    for col in frame.columns:
+                        value = frame.at[r,col]
+                        shown.at[r,col] = (f"{value:,.0f}" if finite(value) else "N/A") if col=="numberOfAnalysts" else pct(value) if col=="growth" else units.money(value,per_share=name=="EPS estimates")
+                shown.index = [labels.get(x,x) for x in shown.index]
+                shown.columns = [re.sub(r"([a-z])([A-Z])",r"\1 \2",x).replace("avg","Average").title() for x in shown.columns]
+                st.dataframe(shown,width="stretch")
+        else:
+            st.info("No analyst consensus estimates were returned. Model forecasts are available separately when source financials support them.")
+    with tabs[7]:
+        st.subheader("Financial KPIs")
+        frames = [pd.concat([getattr(hist,key),getattr(forecast,key)],axis=1) if forecast else getattr(hist,key) for key in ("income","balance","cashflow")]
+        kpis = calculate_kpis(*frames)
+        shown = kpis.copy().astype(object)
+        for row in kpis.index:
+            shown.loc[row] = [pct(x) if row in PERCENT_KPIS else f"{x:,.1f}" if row in DAY_KPIS and finite(x) else "N/A" if row in DAY_KPIS else multiple(x) for x in kpis.loc[row]]
+        shown.columns = [col+(" · Actual" if col in hist.years else " · Forecast") for col in shown.columns]
+        st.dataframe(shown,width="stretch",height=680)
+        st.caption("ROE / ROA / ROIC and asset turnover use average opening and closing balances; the first available period uses closing balances. ROIC uses equity + debt − cash. ROE / ROIC are N/A for non-positive capital bases. Days use closing working capital; quick ratio uses cash plus receivables. DuPont ROE = net margin × asset turnover × equity multiplier.")
+        st.markdown("#### Risk screening · historical and Base model")
+        st.dataframe(bundle.risks,hide_index=True,width="stretch")
+    with tabs[8]:
+        st.subheader("Model audit · Base")
+        st.dataframe(bundle.checks,hide_index=True,width="stretch")
+        st.caption("A passed reconciliation confirms arithmetic consistency, not the accuracy of source data or appropriateness of assumptions. N/A inputs remain visible. Reconciliation tolerance is one reporting-currency unit; the opening-balance gate allows minor source rounding.")
+        if forecast:
+            for note in forecast.notes:
+                st.caption(note)
+    with tabs[9]:
+        st.subheader("Take the model into your workflow")
+        st.markdown("#### Complete Excel financial model")
+        st.caption("20 formatted worksheets. Base statements, schedules, DCF and sensitivity use Excel formulas. Yellow assumptions are editable. Scenario comparisons, KPIs, peers and source checks are captured app results; regenerate them after app changes. Export is always the Base workbook with all scenario comparisons.")
+        try:
+            workbook = export_excel(bundle,units,peers_frame)
+        except Exception:
+            logging.exception("Excel export failed for %s",data.ticker)
+            st.warning("The Excel download is temporarily unavailable. Your analysis and Power BI downloads remain available. Try refreshing the public data.")
+        else:
+            st.download_button("Download Complete Financial Model.xlsx",workbook,file_name=f"{data.ticker}_Complete_Financial_Model.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",type="primary")
+        st.markdown("#### Power BI · direct CSV downloads")
+        st.caption("UTF-8 files with raw, unscaled values, fiscal period keys and Actual / Model Forecast labels. Currency, per-share values, rates and ratios retain their meaning.")
+        files = powerbi_files(bundle)
+        cols = st.columns(3)
+        for n,(name,contents) in enumerate(files.items()):
+            with cols[n%3]:
+                st.download_button(name,contents,file_name=name,mime="text/csv" if name.endswith("csv") else "text/plain",key=f"dl_{name}",width="stretch")
     st.divider()
-    st.caption("Tip: for Indian stocks, ticker form such as RELIANCE.NS remains the most reliable input. Company-name search is also supported when Yahoo Finance resolves it.")
+    st.caption(FOOTER)
 
-if run or demo_run:
-    selected_company = "AAPL" if demo_run else company_input
-    peers = ["MSFT", "GOOGL", "AMZN"] if demo_run else [x.strip() for x in peers_text.split(",") if x.strip()]
+
+if __name__ == "__main__":
     try:
-        with st.status("Running financial modelling agents…", expanded=True) as status:
-            st.write("1. Resolving company/ticker")
-            st.write("2. Fetching market data and annual statements")
-            st.write("3. Normalizing historical statements")
-            st.write("4. Deriving operating assumptions and schedules")
-            st.write("5. Building Bear / Base / Bull integrated 3-statement forecasts")
-            st.write("6. Running KPIs, DCF, reverse DCF and Monte Carlo")
-            st.write("7. Pulling optional trading comps and available consensus data")
-            st.write("8. Running model audit checks")
-            result = FinancialModelOrchestrator().run(selected_company, peer_tickers=peers, years=years, simulations=simulations)
-            st.session_state.result = result
-            status.update(label="Financial model complete", state="complete", expanded=False)
-    except Exception as exc:
-        st.error(f"Model run failed: {exc}")
-        st.stop()
-
-st.markdown("### How the model works")
-arch_cols = st.columns(4)
-architecture = [
-    ("1. Company Data", "Company identification → market data → historical financial statements"),
-    ("2. Financial Model", "Historical normalization → operating schedules → integrated 3-statement forecast"),
-    ("3. Valuation", "DCF → reverse DCF → scenario analysis → trading comparables"),
-    ("4. Review & Export", "KPIs → risk checks → model audit → Excel / Power BI export"),
-]
-for col, (head, body) in zip(arch_cols, architecture):
-    with col:
-        st.markdown(
-            f"<div style='min-height:120px;padding:16px;border:1px solid rgba(47,117,181,.35);"
-            f"border-radius:12px;background:rgba(47,117,181,.06)'><b>{head}</b><br><br>{body}</div>",
-            unsafe_allow_html=True,
-        )
-
-with st.expander("What the system produces", expanded=False):
-    st.markdown("""
-- Historical financial statements and normalized KPIs
-- Base / Bull / Bear 3-statement forecasts and operating schedules
-- DCF, reverse DCF, Monte Carlo and optional trading comps
-- Model checks, risk flags and source/audit metadata
-- Linked Excel financial model plus Power BI-ready tables
-
-**Important:** actual/source data, model forecasts and available consensus estimates are kept separate.
-""")
-
-if "result" not in st.session_state:
-    st.info("For a fast demo, click **Run 1-click demo (AAPL)** in the sidebar. Or enter any supported company/ticker and run the complete model.")
-    st.stop()
-
-r = st.session_state.result
-meta = r["meta"]
-hist = r["historical"]
-fc = r["forecasts"]
-val = r["valuation"]
-kpis = r["kpis"]
-info = r["data"].info
-
-title = meta.get("Company") or meta.get("Ticker")
-st.subheader(f"{title} ({meta.get('Ticker')})")
-st.caption(
-    f"{meta.get('Exchange') or 'Exchange N/A'} | {meta.get('Currency') or 'Currency N/A'} | "
-    f"{meta.get('Sector') or 'Sector N/A'} | Source: {meta.get('Source')} | Fetched: {meta.get('Data Timestamp UTC')}"
-)
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Market Cap (Cr)", f"{cr_value(info.get('marketCap')):,.1f}" if info.get("marketCap") else "N/A")
-current_price = info.get("currentPrice") or info.get("regularMarketPrice")
-c2.metric("Current Price", money(current_price))
-c3.metric("DCF Implied Price", money(val.get("Implied Price")))
-c4.metric("WACC", f"{val.get('WACC', np.nan):.1%}" if np.isfinite(val.get("WACC", np.nan)) else "N/A")
-c5.metric("MC Median Price", money(r["monte_carlo"].get("p50")))
-
-tabs = st.tabs([
-    "Executive Dashboard", "Historical Actuals", "Forecast & Schedules", "3-Statement Model",
-    "Valuation", "Trading Comps", "Consensus", "KPIs & Risks", "Audit", "Excel / Power BI"
-])
-
-with tabs[0]:
-    base = fc["Base"]
-    chart = (base.loc[["Revenue", "EBITDA", "Net Income", "FCF"]] / CRORE).T.reset_index(names="Period")
-    fig_forecast = px.line(chart, x="Period", y=["Revenue", "EBITDA", "Net Income", "FCF"], markers=True, title=f"Base-case forecast ({meta.get('Currency') or ''} Cr)", color_discrete_sequence=["#4472C4", "#70AD47", "#7030A0", "#ED7D31"])
-    fig_forecast.update_layout(legend_title_text="", plot_bgcolor="white", paper_bgcolor="white", yaxis_title=f"{meta.get('Currency') or 'Currency'} Crore")
-    st.plotly_chart(fig_forecast, width="stretch")
-
-    m = kpis.reset_index(names="Period")
-    margin_cols = [c for c in ["Gross Margin", "EBITDA Margin", "Net Margin", "FCF Margin"] if c in m.columns]
-    if margin_cols:
-        fig_margin = px.line(m, x="Period", y=margin_cols, markers=True, title="Margins and cash conversion", color_discrete_sequence=["#2F75B5", "#70AD47", "#ED7D31", "#7030A0"])
-        fig_margin.update_layout(legend_title_text="", plot_bgcolor="white", paper_bgcolor="white")
-        st.plotly_chart(fig_margin, width="stretch")
-
-    left, right = st.columns(2)
-    with left:
-        st.write("**Rule-based risk flags**")
-        for flag in r["flags"]:
-            st.write("•", flag)
-    with right:
-        mc = r["monte_carlo"]
-        st.write("**Monte Carlo valuation range**")
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("P10", money(mc.get("p10")))
-        mc2.metric("Median", money(mc.get("p50")))
-        mc3.metric("P90", money(mc.get("p90")))
-        mc4.metric("Simulations", f"{int(mc.get('count', 0)):,}" if mc.get('count') is not None else "N/A")
-
-with tabs[1]:
-    st.caption("Historical annual data from the market-data provider. These are actual/source values, not model forecasts.")
-    st.caption(f"Monetary values shown in {meta.get('Currency') or 'Currency'} crore (Cr).")
-    st.dataframe(crore_model(hist).style.format("{:,.1f}"), width="stretch")
-
-with tabs[2]:
-    scen = st.selectbox("Scenario", ["Bear", "Base", "Bull"], index=1, key="forecast_scenario")
-    st.caption(f"Monetary values shown in {meta.get('Currency') or 'Currency'} crore (Cr).")
-    st.dataframe(crore_model(fc[scen]).style.format("{:,.1f}"), width="stretch")
-    st.write("**Base assumptions**")
-    st.dataframe(pd.DataFrame({"Assumption": list(r["assumptions"].keys()), "Value": list(r["assumptions"].values())}), width="stretch")
-    st.caption("Bull/Bear scenarios adjust revenue growth and margins around the base assumptions. The forecast is deterministic and formula-driven.")
-
-with tabs[3]:
-    scen3 = st.radio("3-statement scenario", ["Base", "Bull", "Bear"], horizontal=True)
-    model = fc[scen3]
-    st.caption(f"Monetary values shown in {meta.get('Currency') or 'Currency'} crore (Cr). Per-share valuation metrics remain in reporting currency.")
-    st.write("**Income Statement**")
-    st.dataframe(crore_model(model.loc[["Revenue", "COGS", "Gross Profit", "EBITDA", "D&A", "EBIT", "Interest Expense", "Pretax Income", "Tax", "Net Income"]]).style.format("{:,.1f}"), width="stretch")
-    st.write("**Balance Sheet**")
-    st.dataframe(crore_model(model.loc[["Cash", "Accounts Receivable", "Inventory", "Net PPE", "Other Assets", "Total Assets", "Accounts Payable", "Total Debt", "Other Liabilities", "Equity", "Total Liabilities & Equity", "Balance Check"]]).style.format("{:,.1f}"), width="stretch")
-    st.write("**Cash Flow / Schedules**")
-    st.dataframe(crore_model(model.loc[["CFO", "Capex", "Debt Issuance/(Repayment)", "Dividends", "Net Change in Cash", "Cash Flow Check", "FCF"]]).style.format("{:,.1f}"), width="stretch")
-    st.warning("Generic corporate model: 'Other Liabilities' is the balancing residual. Banks, NBFCs, insurers and REITs require sector-specific models and should not rely on this generic template.")
-
-with tabs[4]:
-    st.markdown("### Valuation summary")
-    st.caption("DCF, reverse DCF and Monte Carlo outputs presented as finance metrics — no raw code/JSON.")
-
-    current_price = info.get("currentPrice", info.get("regularMarketPrice"))
-    try:
-        current_price = float(current_price) if current_price is not None else np.nan
+        main()
     except Exception:
-        current_price = np.nan
-
-    implied_price = float(val.get("Implied Price", np.nan))
-    wacc = float(val.get("WACC", np.nan))
-    terminal_growth = float(val.get("Terminal Growth", np.nan))
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Current Price", f"{current_price:,.2f}" if np.isfinite(current_price) else "N/A")
-    k2.metric(
-        "DCF Implied Price",
-        f"{implied_price:,.2f}" if np.isfinite(implied_price) else "N/A",
-        delta=(f"{(implied_price/current_price-1):+.1%}" if np.isfinite(implied_price) and np.isfinite(current_price) and current_price else None),
-    )
-    k3.metric("WACC", f"{wacc:.1%}" if np.isfinite(wacc) else "N/A")
-    k4.metric("Terminal Growth", f"{terminal_growth:.1%}" if np.isfinite(terminal_growth) else "N/A")
-
-    st.markdown("#### DCF bridge")
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("PV of Forecast FCF", f"{float(val.get('PV Forecast FCF', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('PV Forecast FCF', np.nan))) else "N/A")
-    d2.metric("PV of Terminal Value", f"{float(val.get('PV Terminal Value', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('PV Terminal Value', np.nan))) else "N/A")
-    d3.metric("Enterprise Value", f"{float(val.get('Enterprise Value', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('Enterprise Value', np.nan))) else "N/A")
-    d4.metric("Equity Value", f"{float(val.get('Equity Value', np.nan))/1e7:,.1f} Cr" if np.isfinite(float(val.get('Equity Value', np.nan))) else "N/A")
-
-    left, right = st.columns([1, 2])
-    with left:
-        st.markdown("#### Reverse DCF")
-        rev = r.get("reverse_dcf", {}) or {}
-        target_price = rev.get("Target Price", np.nan)
-        scale = rev.get("Implied UFCF Scale", np.nan)
-        try: target_price = float(target_price)
-        except Exception: target_price = np.nan
-        try: scale = float(scale)
-        except Exception: scale = np.nan
-        r1, r2 = st.columns(2)
-        r1.metric("Market / Target Price", f"{target_price:,.2f}" if np.isfinite(target_price) else "N/A")
-        r2.metric("Implied FCF vs Base", f"{scale:.2f}x" if np.isfinite(scale) else "N/A")
-        if np.isfinite(scale):
-            if 0.95 <= scale <= 1.05:
-                st.info("Market price is broadly consistent with the base-case cash-flow path.")
-            elif scale > 1.05:
-                st.info("Market price implies cash flows above the base-case path.")
-            else:
-                st.info("Market price implies cash flows below the base-case path.")
-
-        st.markdown("#### Monte Carlo valuation")
-        mc = r.get("monte_carlo", {}) or {}
-        p10 = float(mc.get("p10", np.nan)); p50 = float(mc.get("p50", np.nan)); p90 = float(mc.get("p90", np.nan)); mean = float(mc.get("mean", np.nan))
-        mc_df = pd.DataFrame({
-            "Case": ["P10", "Median", "Mean", "P90"],
-            "Implied Price": [p10, p50, mean, p90],
-        })
-        st.dataframe(mc_df.style.format({"Implied Price": "{:,.2f}"}), hide_index=True, width="stretch")
-        st.caption("P10–P90 shows the valuation range from simulated WACC, terminal growth and cash-flow assumptions.")
-
-    with right:
-        st.markdown("#### DCF sensitivity")
-        sens = r["sensitivity"].pivot(index="WACC", columns="Terminal Growth", values="Implied Price")
-        sens.index = [f"{x:.0%}" for x in sens.index]
-        sens.columns = [f"{x:.1%}" for x in sens.columns]
-        fig_sens = px.imshow(
-            sens,
-            aspect="auto",
-            text_auto=".2f",
-            labels={"x": "Terminal Growth", "y": "WACC", "color": "Implied Price"},
-            title="Implied price across WACC and terminal-growth assumptions",
-        )
-        st.plotly_chart(fig_sens, width="stretch", config={"displayModeBar": False, "displaylogo": False})
-
-    st.caption("Valuation outputs are model estimates, not investment advice or analyst consensus.")
-
-with tabs[5]:
-    if r["comps"] is None or r["comps"].empty:
-        st.info("No peer tickers were supplied. Add comma-separated peer tickers in the sidebar and rerun the model.")
-    else:
-        st.dataframe(r["comps"], width="stretch")
-        st.write("**Peer multiple distribution**")
-        summary = r.get("comps_summary", {}) or {}
-        if summary:
-            st.markdown("#### Comparable valuation summary")
-            summary_rows = []
-            for key, value in summary.items():
-                label = str(key).replace("_", " ").title()
-                if isinstance(value, (int, float, np.integer, np.floating)):
-                    display = f"{float(value):,.2f}"
-                else:
-                    display = str(value)
-                summary_rows.append({"Metric": label, "Value": display})
-            st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
-
-with tabs[6]:
-    if not r["consensus"]:
-        st.info("No analyst-consensus tables were available from the current data provider for this ticker. Model forecasts remain separate from consensus.")
-    else:
-        for name, df in r["consensus"].items():
-            st.write(f"**{name}**")
-            st.dataframe(df, width="stretch")
-
-with tabs[7]:
-    pct_cols = [c for c in ["Revenue Growth", "Gross Margin", "EBITDA Margin", "EBIT Margin", "Net Margin", "FCF Margin", "ROE", "ROA"] if c in kpis.columns]
-    st.dataframe(kpis.style.format("{:.2%}", subset=pct_cols), width="stretch")
-    st.write("**Flags**")
-    for flag in r["flags"]:
-        st.write("•", flag)
-
-with tabs[8]:
-    audit_df = pd.DataFrame(r["audit"])
-    st.dataframe(audit_df, width="stretch")
-    if not audit_df.empty and (audit_df["Status"] == "FAIL").any():
-        st.error("One or more model checks failed. Review assumptions/model output before using the valuation.")
-    else:
-        st.success("Core balance-sheet and cash roll-forward checks passed for all scenarios.")
-    st.markdown("#### Model metadata")
-    meta_rows = []
-    for key, value in meta.items():
-        if isinstance(value, (dict, list, tuple)):
-            value = str(value)
-        meta_rows.append({"Field": str(key), "Value": value})
-    st.dataframe(pd.DataFrame(meta_rows), hide_index=True, width="stretch")
-
-with tabs[9]:
-    orch = FinancialModelOrchestrator()
-
-    linked_tmp = Path(tempfile.gettempdir()) / f"{meta['Ticker']}_Complete_Financial_Model.xlsx"
-    orch.export_agent.export_linked_financial_model(linked_tmp, r)
-    st.success("Linked financial model ready: editable assumptions, formula-driven schedules, 3 statements, DCF, sensitivity, checks and dashboard in one workbook.")
-    st.download_button(
-        "Download Complete Linked Financial Model.xlsx",
-        data=linked_tmp.read_bytes(),
-        file_name=linked_tmp.name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        width="stretch",
-    )
-
-    raw_tmp = Path(tempfile.gettempdir()) / f"{meta['Ticker']}_Raw_Model_Output.xlsx"
-    orch.export_agent.export_excel(raw_tmp, r)
-    with st.expander("Optional: raw agent output workbook"):
-        st.download_button(
-            "Download raw output workbook",
-            data=raw_tmp.read_bytes(),
-            file_name=raw_tmp.name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
-        )
-
-    pbi = orch.export_agent.power_bi_tables(r)
-    st.markdown("### Power BI-ready tables")
-    st.caption("Download each table directly as CSV. No ZIP extraction needed.")
-
-    for name, df in pbi.items():
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label=f"Download {name}.csv",
-            data=csv_bytes,
-            file_name=f"{meta['Ticker']}_{name}.csv",
-            mime="text/csv",
-            width="stretch",
-            key=f"download_{name}",
-        )
-
-    powerbi_readme = (
-        "Load Company, Period, FinancialActuals, Forecasts, KPIs, Valuation, Assumptions and ModelChecks. "
-        "Create 1-to-many relationships from Company[Ticker] to fact tables and Period[Period] to Actual/Forecast/KPI tables. "
-        "Suggested measures: Revenue, EBITDA, EBITDA Margin, Net Income, FCF, Revenue Growth, Debt/EBITDA, ROE, DCF Implied Price."
-    )
-    st.download_button(
-        "Download Power BI setup notes",
-        data=powerbi_readme.encode("utf-8"),
-        file_name=f"{meta['Ticker']}_PowerBI_README.txt",
-        mime="text/plain",
-        width="stretch",
-    )
-
-st.divider()
-st.caption("This is a modelling tool, not a guarantee of investment outcomes. Verify material figures against company filings and primary sources before acting on the output.")
+        logging.exception("Dashboard rendering failed")
+        st.error("This view could not be completed. Refresh public data or retry with another company. The local application log contains diagnostic details.")

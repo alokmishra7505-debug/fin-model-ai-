@@ -1,63 +1,80 @@
+from dataclasses import dataclass
 import math
 import numpy as np
 import pandas as pd
 
 
-def safe_float(x, default=np.nan):
+def finite(value):
     try:
-        if x is None:
-            return default
-        v = float(x)
-        return v if math.isfinite(v) else default
-    except Exception:
-        return default
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
-def latest_value(series_or_row, default=np.nan):
-    try:
-        s = pd.Series(series_or_row).dropna()
-        return safe_float(s.iloc[0] if len(s) else default, default)
-    except Exception:
-        return default
+def safe_div(a, b):
+    return float(a) / float(b) if finite(a) and finite(b) and b != 0 else np.nan
 
 
-def get_row(df: pd.DataFrame, candidates, default=0.0):
-    if df is None or df.empty:
-        return pd.Series(dtype=float)
-    for name in candidates:
-        if name in df.index:
-            s = pd.to_numeric(df.loc[name], errors="coerce")
-            return s
-    return pd.Series([default] * len(df.columns), index=df.columns, dtype=float)
+@dataclass(frozen=True)
+class Units:
+    currency: str = "USD"
+    selection: str = "Auto"
+
+    @property
+    def name(self):
+        return ("Crore" if self.currency == "INR" else "Million") if self.selection == "Auto" else self.selection
+
+    @property
+    def scale(self):
+        return {"Crore": 1e7, "Million": 1e6, "Billion": 1e9}[self.name]
+
+    @property
+    def symbol(self):
+        return {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥"}.get(self.currency, self.currency + " ")
+
+    @property
+    def suffix(self):
+        return {"Crore": " Cr", "Million": "m", "Billion": "bn"}[self.name]
+
+    @property
+    def label(self):
+        return f"{self.currency} · {self.name.lower()}s"
+
+    def money(self, value, per_share=False):
+        if not finite(value):
+            return "N/A"
+        if value == 0:
+            return "–"
+        amount = abs(value) if per_share else abs(value) / self.scale
+        result = f"{self.symbol}{amount:,.2f}" if per_share else f"{self.symbol}{amount:,.1f}{self.suffix}"
+        return f"({result})" if value < 0 else result
 
 
-def annualize_columns(df: pd.DataFrame):
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    cols = []
-    for c in out.columns:
-        try:
-            cols.append(pd.Timestamp(c).year)
-        except Exception:
-            cols.append(str(c))
-    out.columns = cols
-    out = out.loc[:, ~pd.Index(out.columns).duplicated()]
-    return out
+def pct(value):
+    return f"{value:.1%}" if finite(value) else "N/A"
 
 
-def bounded(value, lo, hi, fallback=0.0):
-    try:
-        value = float(value)
-        if not np.isfinite(value):
-            return fallback
-        return max(lo, min(hi, value))
-    except Exception:
-        return fallback
+def multiple(value):
+    return f"{value:,.2f}x" if finite(value) else "N/A"
 
 
-def median_ratio(num: pd.Series, den: pd.Series, lo=-10, hi=10, fallback=0.0):
-    x = (pd.to_numeric(num, errors='coerce') / pd.to_numeric(den, errors='coerce')).replace([np.inf, -np.inf], np.nan).dropna()
-    if x.empty:
-        return fallback
-    return bounded(x.median(), lo, hi, fallback)
+def statement_display(frame, units):
+    result = frame.copy().astype(object)
+    for row in result.index:
+        for col in result.columns:
+            v = frame.at[row, col]
+            if row in ("EPS", "EPS change"):
+                result.at[row, col] = units.money(v, per_share=True)
+            elif row in ("Shares",):
+                result.at[row, col] = f"{v / 1e6:,.1f}m" if finite(v) else "N/A"
+            elif "margin" in row.lower() or row in ("Revenue growth", "Tax rate", "Interest rate"):
+                result.at[row, col] = pct(v)
+            elif row.endswith("days"):
+                result.at[row, col] = f"{v:,.1f}" if finite(v) else "N/A"
+            else:
+                result.at[row, col] = units.money(v)
+    return result
+
+
+def as_float(value, default=np.nan):
+    return float(value) if finite(value) else default

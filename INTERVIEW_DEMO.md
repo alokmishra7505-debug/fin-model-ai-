@@ -1,14 +1,12 @@
-# 3-minute demo flow
+# Interview demo
 
-1. Enter a company name/ticker.
-2. Explain that the orchestration layer delegates data, normalization, schedules, forecast, valuation and audit work to specialized modules.
-3. Show actual historical data separately from model forecasts.
-4. Switch between Bear / Base / Bull scenarios.
-5. Show integrated statements and key ratios.
-6. Show DCF sensitivity and reverse DCF / Monte Carlo outputs.
-7. Open Model Checks to demonstrate controls and reproducibility.
-8. Download the complete Excel model and open its Dashboard / Assumptions / DCF / Sensitivity / Model Checks sheets.
+1. Run the one-click AAPL demo.
+2. Explain the Data / Model / Valuation / Control workflow.
+3. Inspect historical actuals, then edit assumptions in Forecast & Schedules.
+4. Compare Bear, Base and Bull cases.
+5. Show three-statement balance and cash reconciliation.
+6. Review DCF, reverse DCF, sensitivity and Monte Carlo assumptions.
+7. Download the Excel model and Power BI CSVs.
 
-## Strong positioning
-
-The key point is not that an LLM invents a valuation. The system automates data retrieval, normalization and orchestration while accounting links and valuation calculations are deterministic and assumptions remain visible and editable.
+Missing source values remain N/A. Model forecasts are distinct from analyst consensus.
+See README.md for methodology and limitations.

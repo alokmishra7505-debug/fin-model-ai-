@@ -1,9 +1,12 @@
 .venv/
 __pycache__/
-*.pyc
+.pytest_cache/
 .DS_Store
-.env
+exports/*
+!exports/.gitkeep
+data/cache/
+*.log
+dist/
 .streamlit/secrets.toml
-*.xlsx
-*.csv
-*.zip
+.env
+.env.*

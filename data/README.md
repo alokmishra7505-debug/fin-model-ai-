@@ -1,0 +1,1 @@
+Successful public-data fetches are saved in `cache/<ticker>/` with their original UTC retrieval timestamp. The app only uses a saved snapshot as a fallback when live annual statements are unavailable. These files are ignored by Git. No synthetic financial statements are supplied as actuals.
