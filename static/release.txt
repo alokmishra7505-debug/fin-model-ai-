@@ -1,2 +1,1 @@
-finmodel-ai-safe-export-2026-10-02
-base-commit: 40d34ba
+finmodel-yearwise-nse-2026-10-03

@@ -44,7 +44,7 @@ def value_company(model, data):
     info, a = data.info, model.assumptions
     if data.currency != info.get("currency", data.currency):
         return Valuation(message="Quote and financial reporting currencies differ. DCF is unavailable until a consistent currency basis is supplied.")
-    if data.currency == "Unknown":
+    if not data.currency or data.currency == "Unknown":
         return Valuation(message="Reporting currency is unavailable; valuation has been paused.")
     if info.get("sector") == "Financial Services":
         return Valuation(message="Industrial-company FCFF valuation is disabled for financial institutions. Banks and insurers need regulatory capital, deposit and equity-based models.")
@@ -86,11 +86,12 @@ def value_company(model, data):
     return Valuation(result, cashflows, sensitivity)
 
 
-def reverse_dcf(hist, data, a, years, target_price):
+def reverse_dcf(hist, data, a, years, target_price, yearly=None):
     if not finite(target_price) or target_price <= 0:
         return np.nan, "Current market price is unavailable."
     def objective(growth):
-        model = build_forecast(hist, data.info, replace(a, growth=growth), years)
+        annual = tuple(replace(item,growth=growth) for item in yearly) if yearly else None
+        model = build_forecast(hist, data.info, replace(a, growth=growth), years,annual)
         v = value_company(model, data)
         return v.values.get("Implied Price", np.nan)-target_price
     # Search only a bracket containing valid perpetuity valuations.
@@ -117,9 +118,9 @@ def monte_carlo(model, data, count=1000, seed=42):
         return np.array([]), pd.Series(dtype=float)
     rng = np.random.default_rng(seed)
     a, o = model.assumptions, model.opening
-    growth = np.clip(rng.normal(a.growth,.03,count),-.5,1)
-    gm = np.clip(rng.normal(a.gross_margin,.02,count),.01,.99)
-    margin = np.clip(rng.normal(a.ebitda_margin,.02,count),0,gm)
+    growth_shock = rng.normal(0,.03,count)
+    gm_shock = rng.normal(0,.02,count)
+    margin_shock = rng.normal(0,.02,count)
     rates = rng.normal(base.values["WACC"],.01,count)
     terminal = rng.normal(a.terminal_growth,.005,count)
     revenue = np.full(count,o["Revenue"])
@@ -127,6 +128,10 @@ def monte_carlo(model, data, count=1000, seed=42):
     nwc = np.full(count,o["Net Working Capital"])
     pv = np.zeros(count)
     for n in range(1,len(model.income.columns)+1):
+        a = model.yearly_assumptions[n-1] if model.yearly_assumptions else model.assumptions
+        growth = np.clip(a.growth+growth_shock,-.5,1)
+        gm = np.clip(a.gross_margin+gm_shock,.01,.99)
+        margin = np.clip(a.ebitda_margin+margin_shock,0,gm)
         revenue = revenue*(1+growth)
         capex = revenue*a.capex_pct
         da = np.minimum(revenue*a.da_pct,np.maximum(0,ppe+capex))

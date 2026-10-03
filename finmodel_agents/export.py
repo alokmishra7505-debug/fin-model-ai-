@@ -5,11 +5,11 @@ import numpy as np
 import pandas as pd
 import xlsxwriter
 from xlsxwriter.utility import xl_rowcol_to_cell
-from .forecasting import LABELS
+from .forecasting import LABELS, OPERATING_KEYS
 from .utils import finite, as_float
 from .kpis import PERCENT_KPIS, DAY_KPIS
 
-SHEETS = ["Cover", "Assumptions", "Historical IS", "Historical BS", "Historical CF", "Revenue Build",
+SHEETS = ["Cover", "Financial Model", "Assumptions", "Historical IS", "Historical BS", "Historical CF", "Revenue Build",
           "Working Capital", "Capex & Depreciation", "Debt Schedule", "Forecast IS", "Forecast BS", "Forecast CF",
           "DCF", "Comps", "Sensitivity", "Scenario Analysis", "KPIs", "Model Checks", "Dashboard", "Sources"]
 
@@ -37,7 +37,7 @@ def missing_number_handler(ws, row, col, value, cell_format=None):
     return None  # Let XlsxWriter write an ordinary finite number.
 
 
-def excel_workbook(bundle, units, comps=None):
+def excel_workbook(bundle, units, comps=None, scenario="Base"):
     out = BytesIO()
     wb = xlsxwriter.Workbook(out, {"in_memory": True, "strings_to_formulas": False, "strings_to_urls": False})
     wb.set_properties({"title":f"FinModel AI | {bundle.data.name}","author":"FinModel AI"})
@@ -69,7 +69,7 @@ def excel_workbook(bundle, units, comps=None):
         ws.set_row(2,42)
         ws.set_row(4,32)
         ws.write(1,0,f"FinModel AI | {name}",title)
-        ws.merge_range(2,0,2,7,f"{bundle.data.ticker} · {units.label} except per-share prices, ratios and shares · Base model",note)
+        ws.merge_range(2,0,2,7,f"{bundle.data.name} · {units.label} except per-share prices, ratios and shares · {scenario} case",note)
         ws.set_tab_color("#087f8c" if name in ("Cover","Dashboard","DCF") else "#71839a")
         ws.set_landscape()
         ws.fit_to_pages(1,0)
@@ -108,18 +108,31 @@ def excel_workbook(bundle, units, comps=None):
     for name,frame in (("Historical IS",h.income),("Historical BS",h.balance),("Historical CF",h.cashflow)):
         table(name,frame)
     aw = sheets["Assumptions"]
-    aw.write_row(4,0,["Editable model driver","Value","Basis"],header)
+    f = bundle.forecasts.get(scenario)
+    val = bundle.valuations.get(scenario)
+    active = f.assumptions if f else bundle.assumptions
+    aw.write_row(4,0,["Editable model driver","Common / default value"],header)
     amap = {}
-    for n,(key,value) in enumerate(asdict(bundle.assumptions).items(),5):
+    yearly_map = {}
+    if f:
+        for c,period in enumerate(f.income.columns,2):
+            aw.write(4,c,f"FY {period[:4]} Forecast",forecast_header)
+    for n,(key,value) in enumerate(asdict(active).items(),5):
         amap[key] = f"'Assumptions'!$B${n+1}"
         aw.write(n,0,LABELS[key],text_fmt)
         kind = "number" if key in ("dso","dio","dpo","beta") else "pct"
         aw.write(n,1,value,styles[kind,"edit"])
-        aw.write(n,2,"Model assumption",note)
         bounds = (-.5,1) if key=="growth" else (-1,1) if key=="debt_change_pct" else (-.05,.10) if key=="terminal_growth" else (0,730) if key in ("dso","dio","dpo") else (0,5) if key=="beta" else (0,1)
         aw.data_validation(n,1,n,1,{"validate":"decimal","criteria":"between","minimum":bounds[0],"maximum":bounds[1],"error_type":"stop","error_message":"Use a value within the supported range."})
-    f = bundle.forecasts.get("Base")
-    val = bundle.valuations.get("Base")
+        if f and key in OPERATING_KEYS:
+            for c,item in enumerate(f.yearly_assumptions or (active,)*len(f.income.columns),2):
+                yearly_map[key,c-1] = f"'Assumptions'!{xl_rowcol_to_cell(n,c,row_abs=True,col_abs=True)}"
+                annual_value = getattr(item,key)
+                if annual_value == value:
+                    aw.write_formula(n,c,f"=$B${n+1}",styles[kind,"link"],annual_value)
+                else:
+                    write_numeric(aw,n,c,annual_value,styles[kind,"edit"])
+                aw.data_validation(n,c,n,c,{"validate":"decimal","criteria":"between","minimum":bounds[0],"maximum":bounds[1]})
     source_inputs = {"Market Cap":bundle.data.info.get("marketCap",np.nan),"Current Price":bundle.data.info.get("currentPrice",np.nan)}
     if f:
         source_inputs.update({f"Opening {key}":value for key,value in f.opening.items()})
@@ -136,7 +149,7 @@ def excel_workbook(bundle, units, comps=None):
         aw.write(n,2,"Source / disclosed opening normalization",note)
         n += 1
     aw.set_column(0,0,44)
-    aw.set_column(2,2,46)
+    aw.set_column(2,7,22)
 
     def ref(sheet,row,col):
         return f"'{sheet}'!{xl_rowcol_to_cell(maps[sheet][row],col)}"
@@ -160,7 +173,7 @@ def excel_workbook(bundle, units, comps=None):
             D = lambda row:ref("Debt Schedule",row,c)
             W = lambda row:ref("Working Capital",row,c)
             P = lambda row:ref("Forecast BS",row,c-1) if c>1 else amap["Opening "+row]
-            A = lambda key:amap[key]
+            A = lambda key:yearly_map.get((key,c),amap[key])
             previous_revenue = ref("Forecast IS","Revenue",c-1) if c>1 else A("Opening Revenue")
             is_expr = {
                 "Revenue":f"{previous_revenue}*(1+{A('growth')})", "COGS":f"{I('Revenue')}*(1-{A('gross_margin')})",
@@ -221,7 +234,7 @@ def excel_workbook(bundle, units, comps=None):
         dcf_rows = ["Current Price","Implied Price","Upside","WACC","Terminal Growth","PV Forecast FCF","PV Terminal Value","Enterprise Value","Net Debt","Minority Interest","Preferred Equity","Equity Value","Cost of Equity","After-tax Cost of Debt","Debt Weight"]
         maps["DCF"] = {row:n+5 for n,row in enumerate(dcf_rows)}
         dw = sheets["DCF"]
-        dw.write_row(4,0,["Valuation bridge","Base value"],header)
+        dw.write_row(4,0,["Valuation bridge",f"{scenario} value"],header)
         for row in dcf_rows:
             dw.write(maps["DCF"][row],0,row,text_fmt)
         V = lambda row:ref("DCF",row,1)
@@ -258,25 +271,56 @@ def excel_workbook(bundle, units, comps=None):
         sw.conditional_format(5,1,9,5,{"type":"3_color_scale","min_color":"#f5d4cf","mid_color":"#ffffff","max_color":"#8ed2c4"})
     else:
         sheets["DCF"].write(5,0,val.message if val else "Valuation unavailable",note)
-    # KPI and multi-case comparison are explicitly captured app outputs, separate from the editable Base workbook model.
+    # Put actual and forecast statements in one conventional left-to-right financial model.
+    combined = sheets["Financial Model"]
+    periods = h.years + (list(f.income.columns) if f else [])
+    combined.write(4,0,"Financial model",header)
+    for col,period in enumerate(periods,1):
+        combined.write(4,col,f"FY {period[:4]} {'A' if period in h.years else 'E'}",header if period in h.years else forecast_header)
+    row_cursor = 5
+    for key,label,actual_sheet,forecast_sheet in (("income","INCOME STATEMENT","Historical IS","Forecast IS"),("balance","BALANCE SHEET","Historical BS","Forecast BS"),("cashflow","CASH FLOW","Historical CF","Forecast CF")):
+        combined.write(row_cursor,0,label,header)
+        row_cursor += 1
+        metrics = list(dict.fromkeys(list(getattr(h,key).index)+(list(getattr(f,key).index) if f else [])))
+        for metric in metrics:
+            combined.write(row_cursor,0,metric,text_fmt)
+            kind = metric_kind(metric)
+            for col,period in enumerate(periods,1):
+                actual = period in h.years
+                source_frame = getattr(h if actual else f,key)
+                if metric not in source_frame.index:
+                    combined.write(row_cursor,col,"N/A",note)
+                    continue
+                source_col = list(source_frame.columns).index(period)+1
+                value = excel_number(source_frame.at[metric,period],units.scale if kind in ("money","check") else 1)
+                if value == "N/A":
+                    combined.write(row_cursor,col,"N/A",note)
+                else:
+                    write_cached_formula(combined,row_cursor,col,"="+ref(actual_sheet if actual else forecast_sheet,metric,source_col),styles[kind,"link"],value)
+            row_cursor += 1
+        row_cursor += 2
+    combined.set_column(1,len(periods),18)
+    # Multi-case comparison is explicitly captured output; the selected case drives linked statements.
     kw = sheets["KPIs"]
-    kw.write(2,0,"Captured app KPIs. Regenerate the export after changing assumptions in the app; this table does not recalculate on Excel edits.",note)
+    kw.write(2,0,f"{scenario} KPIs. Captured KPI results; regenerate this workbook after editing assumptions. Historical values are source-derived.",note)
     kw.write(4,0,"KPI",header)
-    for c,col in enumerate(bundle.kpis.columns,1):
-        kw.write(4,c,col+(" · Actual" if col in h.years else " · Base Forecast"),header if col in h.years else forecast_header)
-    for r,(row,values) in enumerate(bundle.kpis.iterrows(),5):
+    from .kpis import calculate_kpis
+    selected_kpis = calculate_kpis(*[pd.concat([getattr(h,key),getattr(f,key)],axis=1) if f else getattr(h,key) for key in ("income","balance","cashflow")])
+    for c,col in enumerate(selected_kpis.columns,1):
+        kw.write(4,c,col+(" · Actual" if col in h.years else f" · {scenario} Forecast"),header if col in h.years else forecast_header)
+    for r,(row,values) in enumerate(selected_kpis.iterrows(),5):
         kw.write(r,0,row,text_fmt)
         kind = "pct" if row in PERCENT_KPIS else "number" if row in DAY_KPIS else "multiple"
         for c,value in enumerate(values,1):
             kw.write(r,c,value if finite(value) else "N/A",styles[kind,"input"])
-    scenario = sheets["Scenario Analysis"]
-    scenario.write(2,0,"Captured Bear / Base / Bull app results. Refresh by regenerating the workbook; scenario comparison is not recalculated by Excel edits.",note)
-    scenario.write_row(4,0,["Scenario","Revenue growth","EBITDA margin","Final revenue","DCF price"],header)
+    scenario_sheet = sheets["Scenario Analysis"]
+    scenario_sheet.write(2,0,"Captured Bear / Base / Bull app results. Refresh by regenerating the workbook; scenario comparison is not recalculated by Excel edits.",note)
+    scenario_sheet.write_row(4,0,["Scenario","Revenue growth","EBITDA margin","Final revenue","DCF price"],header)
     for r,(name,model) in enumerate(bundle.forecasts.items(),5):
         value = bundle.valuations[name].values.get("Implied Price",np.nan)
-        scenario.write(r,0,name,text_fmt)
+        scenario_sheet.write(r,0,name,text_fmt)
         for c,x,kind in [(1,model.assumptions.growth,"pct"),(2,model.assumptions.ebitda_margin,"pct"),(3,model.income.iloc[:,-1]["Revenue"]/units.scale,"money"),(4,value,"price")]:
-            scenario.write(r,c,x if finite(x) else "N/A",styles[kind,"input"])
+            scenario_sheet.write(r,c,x if finite(x) else "N/A",styles[kind,"input"])
     cw = sheets["Comps"]
     cw.write(2,0,"Captured Yahoo trailing metrics. Monetary figures use the selected scale in each row's native currency. Multiples are not meaningful for non-positive denominators.",note)
     if comps is not None and not comps.empty:
@@ -294,7 +338,9 @@ def excel_workbook(bundle, units, comps=None):
     checks = sheets["Model Checks"]
     checks.write_row(4,0,["Check","Status","Detail"],header)
     checks.set_column(2,2,86)
-    for r,(_,row) in enumerate(bundle.checks.iterrows(),5):
+    from .audit import audit_model
+    selected_checks = audit_model(h,f,val)
+    for r,(_,row) in enumerate(selected_checks.iterrows(),5):
         checks.write_row(r,0,row.tolist(),note)
         checks.set_row(r,36)
         if f and row["Check"] in ("Forecast balance sheet","Cash flow reconciliation"):
@@ -317,7 +363,7 @@ def excel_workbook(bundle, units, comps=None):
         chart = wb.add_chart({"type":"column"})
         for r,color in zip(range(5,8),("#172b4d","#087f8c","#b38b4d")):
             chart.add_series({"name":["Dashboard",r,0],"categories":["Dashboard",4,1,4,len(dashboard.columns)],"values":["Dashboard",r,1,r,len(dashboard.columns)],"fill":{"color":color},"border":{"none":True}})
-        chart.set_title({"name":"Operating performance | Actual & Base Forecast"})
+        chart.set_title({"name":"Operating performance | Actual & selected forecast"})
         chart.set_y_axis({"name":units.label,"num_format":"#,##0"})
         chart.set_legend({"position":"bottom"})
         chart.set_size({"width":1050,"height":420})
@@ -328,7 +374,7 @@ def excel_workbook(bundle, units, comps=None):
     cover.write(9,0,"Source retrieved (UTC)",text_fmt)
     cover.write(9,1,bundle.data.retrieved_at,note)
     cover.set_row(9,36)
-    cover.merge_range(11,0,12,6,"Blue: hardcoded inputs | Green: links | Black: formulas | Yellow: editable assumptions. Forecast statements and DCF recalculate. KPIs, scenarios, comps and source checks are captured outputs; regenerate these in the app.",note)
+    cover.merge_range(11,0,12,6,f"Selected case: {scenario}. Blue: inputs | Green: links | Black: formulas | Yellow: editable annual assumptions. Statements, DCF and sensitivity recalculate. Scenario comparisons and comps are captured outputs. Review source and assumption disclosures before external circulation.",note)
     sources = sheets["Sources"]
     sources.set_column(0,0,36)
     sources.set_column(1,1,110)
@@ -338,6 +384,7 @@ def excel_workbook(bundle, units, comps=None):
                    ("Equity bridge","Latest annual cash and debt; disclosed minority / preferred balances deducted when available. No FX conversion."),
                    ("Defaults","Historical operating ratios are bounded; risk-free rates, equity risk premium and financing rates are illustrative editable inputs, not live market yields.")]
     source_rows += [("Disclosure",x) for x in bundle.data.warnings+bundle.notices+h.notes+(f.notes if f else [])]
+    source_rows += [(item.get("Field","Source"),f"{item.get('Source','')} | As of {item.get('As of','')} | {item.get('URL','')}") for item in bundle.data.provenance]
     sources.write_row(4,0,["Source / method","Details"],header)
     for r,row in enumerate(source_rows,5):
         sources.write_row(r,0,row,note)

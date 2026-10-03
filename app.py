@@ -1,6 +1,8 @@
 """FinModel AI — unified Streamlit dashboard."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import html
+import copy
+from datetime import date
 import logging
 import re
 import numpy as np
@@ -10,7 +12,7 @@ import streamlit as st
 from finmodel_agents.market_data import MarketDataAgent
 from finmodel_agents.resolver import resolve
 from finmodel_agents.normalizer import normalize
-from finmodel_agents.forecasting import Assumptions, LABELS, default_assumptions
+from finmodel_agents.forecasting import Assumptions, LABELS, OPERATING_KEYS, default_assumptions
 from finmodel_agents.orchestrator import run_model
 from finmodel_agents.valuation import Valuation, reverse_dcf, monte_carlo
 from finmodel_agents.kpis import calculate_kpis, PERCENT_KPIS, DAY_KPIS
@@ -33,20 +35,20 @@ def fetch_peers(tickers):
 
 
 @st.cache_data(show_spinner=False)
-def cached_model(data, a, years):
-    return run_model(data,a,years)
+def cached_model(data, a, years, yearly=None):
+    return run_model(data,a,years,yearly=yearly)
 
 
 @st.cache_data(show_spinner=False)
 def valuation_extras(hist,data,a,years,forecast,count,seed):
-    growth,message = reverse_dcf(hist,data,a,years,data.info.get("currentPrice",np.nan))
+    growth,message = reverse_dcf(hist,data,a,years,data.info.get("currentPrice",np.nan),yearly=forecast.yearly_assumptions)
     samples,summary = monte_carlo(forecast,data,count,seed)
     return growth,message,samples,summary
 
 
 @st.cache_data(show_spinner=False)
-def export_excel(bundle,units,comps):
-    return excel_workbook(bundle,units,comps)
+def export_excel(bundle,units,comps,scenario="Base"):
+    return excel_workbook(bundle,units,comps,scenario)
 
 
 def style():
@@ -58,7 +60,7 @@ def style():
     .hero h2 {color:white;margin:0;font-size:32px}.hero p{color:#c7d6e7;margin:10px 0 0;max-width:800px}
     .kpi-card {background:#fff;border:1px solid #dce4ef;border-top:4px solid var(--accent);border-radius:10px;padding:17px 18px;min-height:122px;margin-bottom:14px}
     .kpi-label {font-size:12px;color:#61718a;font-weight:600;letter-spacing:.02em}
-    .kpi-value {font-size:26px;font-weight:700;color:#172b4d;letter-spacing:-.035em;white-space:nowrap}
+    .kpi-value {font-size:22px;font-weight:700;color:#172b4d;letter-spacing:-.035em;overflow-wrap:anywhere}
     .kpi-sub {font-size:11px;color:#75859a;margin-top:4px}
     .step {border:1px solid #dce4ef;border-radius:10px;padding:20px;background:white;min-height:165px}
     .step b{color:#087f8c;font-size:14px}.step p{font-size:14px;color:#61718a;margin:12px 0 0}
@@ -100,11 +102,44 @@ def trend(hist,forecast,rows,units,title,key,percent=False):
     chart(fig,key)
 
 
+def numeric_statement(frame,units):
+    result = frame.copy().astype(object)
+    for row in frame.index:
+        rate = "margin" in row.lower() or row in ("Revenue growth","Tax rate","Interest rate")
+        raw = row in ("EPS","EPS change","Shares") or row.endswith("days") or rate
+        for col in frame.columns:
+            value = frame.at[row,col]
+            result.at[row,col] = "N/A" if not finite(value) else f"{value:.1%}" if rate else f"{value/(1 if raw else units.scale):,.2f}"
+    return result
+
+
+def market_inputs(data):
+    with st.expander("Market inputs · sourced overrides"):
+        st.caption("Use a verified dated quote if feeds are unavailable. Price is per share; shares are absolute counts. Source and date are recorded in the Excel workbook.")
+        with st.form(f"market_{data.ticker}"):
+            price = st.number_input("Reviewed price per share",min_value=0.0,value=float(data.info.get("currentPrice")) if finite(data.info.get("currentPrice")) else 0.0)
+            shares = st.number_input("Reviewed shares outstanding",min_value=0.0,value=float(data.info.get("sharesOutstanding")) if finite(data.info.get("sharesOutstanding")) else 0.0,format="%.0f")
+            currency = st.text_input("Quote currency (ISO code)",value=data.info.get("currency") or data.currency)
+            source = st.text_input("Source URL / filing reference")
+            observed = st.date_input("Quote / input date",value=date.today())
+            apply = st.form_submit_button("Apply sourced market inputs")
+        if apply:
+            if price<=0 or shares<=0 or not source.strip() or not re.fullmatch(r"[A-Z]{3}",currency.strip().upper()):
+                st.error("Enter a positive price and share count, a three-letter currency code, and a source reference.")
+            else:
+                updated = copy.deepcopy(data)
+                updated.info.update(currentPrice=price,sharesOutstanding=shares,marketCap=price*shares,currency=currency.strip().upper(),priceAsOf=str(observed),sharesAsOf=str(observed))
+                updated.provenance.append({"Field":"User-reviewed price / shares / quote currency","Source":"User supplied: "+source,"As of":str(observed),"URL":source})
+                updated.warnings = [w for w in updated.warnings if not w.startswith("A market quote is unavailable")]
+                st.session_state["company"]=updated
+                st.rerun()
+
+
 def table(frame,units,forecast=False):
     if frame.empty:
         st.info("No annual statement data is available.")
         return
-    display = statement_display(frame,units)
+    display = numeric_statement(frame,units)
     display.columns = [str(col)+( " · Forecast" if forecast else " · Actual") for col in display.columns]
     st.dataframe(display,width="stretch",height=min(740,38+35*len(display)),column_config={"_index":"Metric"})
 
@@ -162,7 +197,7 @@ def main():
         st.caption("No API key required. Public data can be delayed, incomplete or temporarily rate-limited.")
         st.caption("Examples: AAPL · MSFT · NVDA · RELIANCE.NS · TCS.NS · ASIANPAINT.NS · HDFCBANK.NS")
     st.markdown('<div class="eyebrow">Research workspace / Public equities</div>',unsafe_allow_html=True)
-    st.title("Financial clarity. From filings to forecasts.")
+    st.title("Financial Model & Valuation")
     if analyze or demo or refresh:
         with st.spinner("Retrieving public financial statements…"):
             try:
@@ -188,56 +223,49 @@ def main():
         st.caption(FOOTER)
         return
     data = st.session_state["company"]
+    market_inputs(data)
     hist = normalize(data)
     units = Units(data.currency,unit_choice)
     quote_units = Units(data.info.get("currency",data.currency),unit_choice)
     st.subheader(f"{data.name} · {data.ticker}")
     st.caption(f"{data.info.get('sector','Sector unavailable')} / {data.info.get('industry','Industry unavailable')}  ·  {data.info.get('exchange','Exchange unavailable')}  ·  {units.label}")
     st.caption(f"Source: {data.source} · Retrieved {data.retrieved_at} · {'Saved local snapshot' if data.cached else 'Public-source snapshot'}")
-    for warning in data.warnings:
-        st.warning(warning)
+    if data.warnings:
+        with st.expander("Data availability and source notes",expanded=not finite(data.info.get("currentPrice"))):
+            for warning in data.warnings:
+                st.caption(warning)
     if hist.income.empty:
         st.info("Historical analysis needs annual statements. Use Refresh public data to retry or select another company.")
         st.caption(FOOTER)
         return
     a = st.session_state.get(f"assumptions_{data.ticker}",default_assumptions(hist,data.info))
-    bundle = cached_model(data,a,years)
+    saved = st.session_state.get(f"yearly_{data.ticker}_{years}")
+    yearly = tuple(replace(a,**item) for item in saved) if saved else None
+    bundle = cached_model(data,a,years,yearly)
     for notice in bundle.notices:
         st.warning(notice)
     scenario = st.radio("Model scenario",["Bear","Base","Bull"],index=1,horizontal=True)
     forecast = bundle.forecasts.get(scenario)
     val = bundle.valuations.get(scenario,Valuation(message="Valuation is unavailable without a usable forecast."))
     st.caption(f"Annual Actuals through {hist.years[-1]} · {scenario} Model Forecast · Amounts in {units.label}; prices are per share.")
-    tabs = st.tabs(["Executive Dashboard","Historical Actuals","Forecast & Schedules","3-Statement Model","Valuation","Trading Comps","Consensus","KPIs & Risks","Audit","Excel / Power BI"])
+    tabs = st.tabs(["Financial Model","Historical Actuals","Forecast & Schedules","3-Statement Model","Valuation","Trading Comps","Consensus","KPIs & Risks","Audit","Excel / Power BI"])
     with tabs[0]:
         latest = hist.income.iloc[:,-1]
         cards([("Revenue",units.money(latest["Revenue"]),f"Actual · {hist.years[-1]}"),
                ("EBITDA",units.money(latest["EBITDA"]),f"Margin {pct(safe_div(latest['EBITDA'],latest['Revenue']))}"),
                ("Free cash flow",units.money(hist.cashflow.iloc[:,-1]["FCF"]),"Actual CFO less capex"),
                ("DCF implied price",units.money(val.values.get("Implied Price"),True),f"{scenario} model · {pct(val.values.get('Upside'))} implied upside")])
-        left,right = st.columns(2)
-        with left:
-            trend(hist.income,forecast.income if forecast else None,["Revenue"],units,"Revenue trajectory","revenue")
-        with right:
-            trend(hist.income,forecast.income if forecast else None,["EBITDA","Net Income"],units,"Profitability","profit")
-        left,right = st.columns(2)
-        with left:
-            trend(hist.cashflow,forecast.cashflow if forecast else None,["FCF"],units,"Free cash flow","fcf")
-        with right:
-            k = bundle.kpis
-            historical_k = k.loc[["Gross margin","EBITDA margin","Net margin"],hist.years]
-            forecast_k = calculate_kpis(forecast.income,forecast.balance,forecast.cashflow) if forecast else None
-            trend(historical_k,forecast_k,["Gross margin","EBITDA margin","Net margin"],units,"Margin trends","margins",True)
-        if bundle.forecasts:
-            fig = go.Figure()
-            for name,model in bundle.forecasts.items():
-                fig.add_trace(go.Scatter(x=model.income.columns,y=model.income.loc["Revenue"]/units.scale,name=name,mode="lines+markers"))
-            fig.update_layout(title="Scenario comparison · forecast revenue",yaxis_title=units.label)
-            chart(fig,"scenario_revenue")
-        workflow()
+        for key,label in (("income","Income statement"),("balance","Balance sheet"),("cashflow","Cash flow statement")):
+            st.markdown(f"#### {label}")
+            actual = getattr(hist,key)
+            frame = pd.concat([actual,getattr(forecast,key)],axis=1) if forecast else actual
+            shown = numeric_statement(frame,units)
+            shown.columns = [f"FY {col[:4]} {'A' if col in hist.years else 'E'}" for col in frame.columns]
+            st.dataframe(shown,width="stretch",height=min(700,38+35*len(shown)))
+        st.caption("A = reported actuals; E = model estimates. Edit annual numerical inputs in Forecast & Schedules, then download the selected case under Excel / Power BI.")
     with tabs[1]:
         st.subheader("Historical actuals")
-        st.caption("Annual fiscal periods from Yahoo Finance. N/A means the source did not provide a value. Derived lines and residual categories are disclosed below.")
+        st.caption("Annual fiscal periods from the sources identified above. N/A means the source did not provide a value. Derived lines and residual categories are disclosed below.")
         st.markdown("#### Income statement")
         table(hist.income,units)
         st.markdown("#### Balance sheet")
@@ -248,7 +276,30 @@ def main():
             for line in hist.notes:
                 st.caption(line)
     with tabs[2]:
-        assumptions_editor(data,a)
+        st.subheader("Year-wise forecast inputs · Base case")
+        st.caption("Edit each fiscal year independently. Percentage inputs use 10 for 10%; working-capital days are unscaled. Bear / Bull apply the disclosed shifts to each year. Common valuation inputs and the WACC tax rate remain in the defaults below.")
+        annual = yearly or (a,)*years
+        columns = [f"FY {(pd.Timestamp(hist.years[-1])+pd.DateOffset(years=n)).year} E" for n in range(1,years+1)]
+        labels = [LABELS[k]+(" (days)" if k in ("dso","dio","dpo") else " (%)") for k in OPERATING_KEYS]
+        grid = pd.DataFrame({col:[getattr(item,k)*(1 if k in ("dso","dio","dpo") else 100) for k in OPERATING_KEYS] for col,item in zip(columns,annual)},index=labels)
+        with st.form(f"annual_form_{data.ticker}_{years}"):
+            edited = st.data_editor(grid,width="stretch",key=f"annual_grid_{data.ticker}_{years}")
+            apply_years = st.form_submit_button("Apply year-wise forecast",type="primary")
+        if apply_years:
+            try:
+                overrides = [{k:float(edited.iloc[r,c])/(1 if k in ("dso","dio","dpo") else 100) for r,k in enumerate(OPERATING_KEYS)} for c in range(years)]
+                for values in overrides:
+                    replace(a,**values).validate()
+                st.session_state[f"yearly_{data.ticker}_{years}"] = overrides
+                st.rerun()
+            except (ValueError,TypeError) as exc:
+                st.error(str(exc))
+        if st.button("Reset annual inputs to defaults"):
+            st.session_state.pop(f"yearly_{data.ticker}_{years}",None)
+            st.session_state.pop(f"annual_grid_{data.ticker}_{years}",None)
+            st.rerun()
+        with st.expander("Common valuation inputs and uniform operating defaults"):
+            assumptions_editor(data,a)
         st.caption("Bear: revenue growth −3 percentage points, gross / EBITDA margins −2 points, DSO +5 days. Bull: the reverse. Other drivers remain unchanged; supported bounds apply.")
         if forecast:
             st.markdown(f"#### {scenario} operating schedules")
@@ -383,14 +434,14 @@ def main():
     with tabs[9]:
         st.subheader("Take the model into your workflow")
         st.markdown("#### Complete Excel financial model")
-        st.caption("20 formatted worksheets. Base statements, schedules, DCF and sensitivity use Excel formulas. Yellow assumptions are editable. Scenario comparisons, KPIs, peers and source checks are captured app results; regenerate them after app changes. Export is always the Base workbook with all scenario comparisons.")
+        st.caption("21 formatted worksheets with actuals and forecasts side by side. The selected scenario drives the linked statements, annual assumptions, schedules, DCF and sensitivity. Yellow cells are editable. KPI and multi-case comparisons are captured results; regenerate after changing inputs.")
         try:
-            workbook = export_excel(bundle,units,peers_frame)
+            workbook = export_excel(bundle,units,peers_frame,scenario)
         except Exception:
             logging.exception("Excel export failed for %s",data.ticker)
             st.warning("The Excel download is temporarily unavailable. Your analysis and Power BI downloads remain available. Try refreshing the public data.")
         else:
-            st.download_button("Download Complete Financial Model.xlsx",workbook,file_name=f"{data.ticker}_Complete_Financial_Model.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",type="primary")
+            st.download_button("Download Complete Financial Model.xlsx",workbook,file_name=f"{data.ticker}_{scenario}_Complete_Financial_Model.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",type="primary")
         st.markdown("#### Power BI · direct CSV downloads")
         st.caption("UTF-8 files with raw, unscaled values, fiscal period keys and Actual / Model Forecast labels. Currency, per-share values, rates and ratios retain their meaning.")
         files = powerbi_files(bundle)

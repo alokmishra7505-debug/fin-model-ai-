@@ -4,6 +4,7 @@ import pandas as pd
 from .normalizer import IS_ROWS, BS_ROWS
 from .schedules import operating_schedules
 from .utils import finite, safe_div
+from .forecasting import annual_assumptions
 
 FORECAST_CF_ROWS = ["Net Income", "D&A", "Change in Working Capital", "CFO", "Capex", "FCF", "Planned Debt Change", "Funding Draw", "Dividends", "Financing Cash Flow", "Net Cash Change", "Opening Cash", "Closing Cash", "Cash Reconciliation", "UFCF"]
 
@@ -17,6 +18,7 @@ class ForecastModel:
     assumptions: object
     opening: dict
     notes: list = field(default_factory=list)
+    yearly_assumptions: tuple = ()
 
 
 def opening_balance(hist, info):
@@ -53,17 +55,18 @@ def opening_balance(hist, info):
     return o, notes
 
 
-def build_forecast(hist, info, assumptions, years=5):
+def build_forecast(hist, info, assumptions, years=5, yearly=None):
     assumptions.validate()
     if years not in (3, 4, 5):
         raise ValueError("Select a forecast horizon of three to five years.")
     o, notes = opening_balance(hist, info)
-    a = assumptions
+    annual = annual_assumptions(assumptions,years,yearly)
     prev = o.copy()
     records = {}
     start = pd.Timestamp(hist.years[-1])
     current_debt_share = np.clip(safe_div(o["Current Debt"], o["Debt"]), 0, 1) if o["Debt"] > 0 else 0
     for n in range(1, years+1):
+        a = annual[n-1]
         r = {}
         r["Revenue"] = prev["Revenue"] * (1+a.growth)
         r["Revenue growth"] = a.growth
@@ -118,10 +121,10 @@ def build_forecast(hist, info, assumptions, years=5):
         prev = r
     frame = pd.DataFrame(records)
     notes.extend([
-        "Forecasts use constant annual drivers, a 365-day convention, and the latest reported fiscal period. Fiscal year-end dates are approximated for 52/53-week reporters.",
+        "Forecasts use the displayed year-specific assumptions, a 365-day convention, and the latest reported fiscal period. Fiscal year-end dates are approximated for 52/53-week reporters.",
         "Other assets and liabilities remain fixed in nominal terms. No acquisitions, disposals, FX movements, buybacks or stock compensation are modelled. Total equity includes minority interests when available; allocation between parent and minorities is not forecast.",
         "Cash includes short-term investments where provided. Minimum cash shortfalls produce a visible Funding Draw. Interest is charged on opening debt to avoid circularity; funding draws bear interest from the next year.",
         "Debt retains the opening current/long-term proportion. Shares stay constant at current outstanding shares; EPS uses this count rather than historical weighted-average diluted shares.",
         "Taxes have no loss carryforwards or deferred-tax movements. Depreciation cannot exceed available net PPE plus capex. Dividends apply only to positive net income.",
     ])
-    return ForecastModel(frame.loc[IS_ROWS], frame.loc[BS_ROWS], frame.loc[FORECAST_CF_ROWS], operating_schedules(records), a, o, notes)
+    return ForecastModel(frame.loc[IS_ROWS], frame.loc[BS_ROWS], frame.loc[FORECAST_CF_ROWS], operating_schedules(records), assumptions, o, notes, annual)

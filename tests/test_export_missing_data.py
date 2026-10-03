@@ -43,7 +43,7 @@ def test_missing_market_input_still_exports(sample_data,key):
     sample_data.info[key]=None
     bundle=run_model(sample_data)
     book=load_workbook(BytesIO(excel_workbook(bundle,Units("USD"))),data_only=True)
-    assert len(book.sheetnames)==20
+    assert len(book.sheetnames)==21
 
 
 def test_export_failure_does_not_break_dashboard(sample_data,monkeypatch):

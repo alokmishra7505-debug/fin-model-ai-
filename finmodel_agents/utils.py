@@ -30,7 +30,7 @@ class Units:
 
     @property
     def symbol(self):
-        return {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥"}.get(self.currency, self.currency + " ")
+        return {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥"}.get(self.currency, self.currency + " " if self.currency and self.currency!="Unknown" else "")
 
     @property
     def suffix(self):
@@ -38,7 +38,7 @@ class Units:
 
     @property
     def label(self):
-        return f"{self.currency} · {self.name.lower()}s"
+        return f"{self.currency or 'Currency not supplied'} · {self.name.lower()}s"
 
     def money(self, value, per_share=False):
         if not finite(value):

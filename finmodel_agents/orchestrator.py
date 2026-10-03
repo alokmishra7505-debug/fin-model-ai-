@@ -22,7 +22,7 @@ class ModelBundle:
     notices: list = field(default_factory=list)
 
 
-def run_model(data, assumptions=None, years=5):
+def run_model(data, assumptions=None, years=5, yearly=None):
     hist = normalize(data)
     a = assumptions or default_assumptions(hist,data.info)
     bundle = ModelBundle(data,hist,a)
@@ -31,7 +31,8 @@ def run_model(data, assumptions=None, years=5):
     else:
         for name in SCENARIOS:
             try:
-                f = build_forecast(hist,data.info,scenario_assumptions(a,name),years)
+                annual = tuple(scenario_assumptions(item,name) for item in yearly) if yearly is not None else None
+                f = build_forecast(hist,data.info,scenario_assumptions(a,name),years,annual)
                 bundle.forecasts[name] = f
                 bundle.valuations[name] = value_company(f,data)
             except ValueError as exc:

@@ -23,10 +23,10 @@ def audit_model(hist, forecast, valuation):
         record("No infinite calculations","PASS" if valid else "FAIL","Undefined ratios and per-share values are N/A, never infinity.")
     else:
         record("Forecast availability","REVIEW","A forecast could not be built from the available inputs.")
-    if valuation.values:
+    if valuation and valuation.values:
         v = valuation.values
-        record("Terminal growth below WACC","PASS" if v["WACC"]>v["Terminal Growth"] else "FAIL","Gordon growth requires a positive discount-rate spread.")
-        record("DCF sanity","PASS" if v["Equity Value"]>0 and finite(v["Implied Price"]) and v["Implied Price"]>0 else "REVIEW","Positive equity and per-share value are required for an interpretable DCF.")
+        record("Terminal growth below WACC","PASS" if finite(v["WACC"]) and finite(v["Terminal Growth"]) and v["WACC"]>v["Terminal Growth"] else "FAIL","Gordon growth requires a positive discount-rate spread.")
+        record("DCF sanity","PASS" if finite(v["Equity Value"]) and v["Equity Value"]>0 and finite(v["Implied Price"]) and v["Implied Price"]>0 else "REVIEW","Positive equity and per-share value are required for an interpretable DCF.")
     else:
-        record("DCF availability","REVIEW",valuation.message)
+        record("DCF availability","REVIEW",valuation.message if valuation else "Valuation unavailable")
     return pd.DataFrame(rows)

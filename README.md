@@ -76,11 +76,11 @@ INR statements default to **₹ crore** (1 crore = 10,000,000). Other currencies
 
 ## Excel workbook
 
-The workbook contains 20 sheets: Cover, Assumptions, Historical IS / BS / CF, Revenue Build, Working Capital, Capex & Depreciation, Debt Schedule, Forecast IS / BS / CF, DCF, Comps, Sensitivity, Scenario Analysis, KPIs, Model Checks, Dashboard, and Sources.
+The workbook contains 21 sheets: Cover, Financial Model, Assumptions, Historical IS / BS / CF, Revenue Build, Working Capital, Capex & Depreciation, Debt Schedule, Forecast IS / BS / CF, DCF, Comps, Sensitivity, Scenario Analysis, KPIs, Model Checks, Dashboard, and Sources.
 
 Blue = hardcoded inputs; green = links; black = formulas; yellow fill = editable assumptions. Monetary cells use the selected scale once, per-share prices retain full currency units, negatives use red parentheses, zeros use dashes, and sheets include frozen headings, professional headers and a dashboard chart.
 
-Base statements, schedules, DCF and sensitivity recalculate through Excel formulas. Enter rate assumptions in Excel as decimals or percentages (for example, `12%`), unlike the app's percentage-point inputs. Scenario comparison, KPI, comparable and source-check tables are explicitly labelled captured app outputs. Regenerate the workbook through the app to refresh those tables. Excel does not refresh Yahoo data itself.
+Selected-scenario statements, schedules, DCF and sensitivity recalculate through Excel formulas. Enter rate assumptions in Excel as decimals or percentages (for example, `12%`), unlike the app's percentage-point inputs. Scenario comparison, KPI, comparable and source-check tables are explicitly labelled captured app outputs. Regenerate the workbook through the app to refresh those tables. Excel does not refresh Yahoo data itself.
 
 Formula outputs include independently computed cached results for preview readers. Automated tests evaluate the generated formulas, detect cycles, and change assumptions to reconcile the resulting statements and DCF against the Python engine. Native Excel application recalculation / rendering was not automated in this environment.
 
@@ -117,3 +117,9 @@ Cloud egress can be rate-limited by Yahoo; local snapshots are ephemeral on host
 - **Install or connection errors:** verify Python and internet access. The first installation requires package downloads; later runs can use the direct Streamlit command above.
 
 Official API references: [yfinance](https://ranaroussi.github.io/yfinance/reference/index.html), [Streamlit](https://docs.streamlit.io/develop/api-reference).
+
+
+### Year-wise modelling and NSE fallback
+The Financial Model tab shows numerical actuals and forecasts together. Edit fiscal-year operating inputs in Forecast & Schedules; common valuation inputs remain in the defaults expander. Export follows the selected Base, Bear or Bull case. Annual yellow Excel inputs drive linked statements and valuation; captured KPI and scenario tables must be regenerated after edits.
+
+When Yahoo metadata or quotes are unavailable for NSE tickers, the app checks the official NSE issuer list and dated daily closing-price archives. Closing prices are not live quotes. A validated consolidated annual-filing fallback is currently registered for TCS only; other issuers require additional supported filing mappings. Access failures remain visible and sourced manual market inputs are supported. No market prices are invented. Review currency, reporting dates, source completeness and assumptions before external circulation.

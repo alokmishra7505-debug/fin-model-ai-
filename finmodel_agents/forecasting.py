@@ -46,6 +46,17 @@ LABELS = {
     "dividend_payout": "Dividend payout / net income", "min_cash_pct": "Minimum cash / revenue",
 }
 SCENARIOS = ("Bear", "Base", "Bull")
+VALUATION_KEYS = ("terminal_growth","risk_free","equity_premium","beta","cost_debt")
+OPERATING_KEYS = tuple(key for key in LABELS if key not in VALUATION_KEYS)
+
+
+def annual_assumptions(base, years, overrides=None):
+    if overrides is not None and len(overrides)!=years:
+        raise ValueError("Provide one complete assumption set for each forecast year.")
+    result = tuple(overrides) if overrides is not None else (base,)*years
+    for item in result:
+        item.validate()
+    return result
 
 
 def default_assumptions(hist, info):
